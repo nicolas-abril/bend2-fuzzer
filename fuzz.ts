@@ -7,9 +7,9 @@
 // interpreter's decimal stdout. A
 // disagreement, a crash in any backend, or a compiler rejection of a checked
 // program or a rejection of generated source is a finding; resource blowups
-// (timeouts, stack overflows, check fuel) are persisted but not failures.
+// (timeouts, stack overflows) are persisted but not failures.
 //
-//   node .devs/scripts/fuzz.ts [count] [--seed N] [--jobs N] [--threads N]
+//   bun fuzz.ts [count] [--seed N] [--jobs N] [--threads N]
 //     [--metal] [--io] [--opt N] [--dump] [--dump-min] [--dump-raw] [--no-meta]
 //     [--keep] [--loop] [--smoke] [--check-only]
 //
@@ -44,15 +44,15 @@
 // the synthesizer can also mint mid-expression.
 //
 // Oracles and legs:
-// - interp (spec): pooled `node .devs/scripts/fuzz.ts --worker` children
-//   independently load, halt-check and normalize the raw and sealed siblings;
-//   the sealed request also emits C. The reference value is the raw PARSED
-//   book's result, and the sealed PARSED result must equal it. This is the
-//   CLI's own evaluation path (book_check restores its fuel: unbounded).
-//   The raw request also normalizes the ELABORATED book (Dup/Own marks,
-//   Ann evidence — what book_compile consumes), which must agree with its
-//   parsed sibling: an elaboration-soundness FINDING (elab-diverge); one
-//   differential per seed, on the reference leg. A checker reject or an
+// - interp (spec): pooled `fuzz.ts --worker` children independently load,
+//   check (halt ON; book_check elaborates IN PLACE) and normalize the raw
+//   and sealed siblings on the CHECKED book — the CLI's own evaluation
+//   path; the sealed request also emits C. The reference value is the raw
+//   sibling's result, and the sealed result must equal it. A
+//   parsed-but-unchecked book stopped being a lawful oracle when
+//   elaboration started carrying meaning (the Bool truth bridges evaluate
+//   only elaborated), and the old parsed-vs-elaborated differential died
+//   with it. A checker reject or an
 //   internal crash of the checker/compiler/normalizer on a generated program
 //   is a FINDING; a worker
 //   process DEATH (segfault/abort — detected via exit tracking, stderr tail
@@ -90,21 +90,20 @@
 //   minted def is non-recursive and only calls already-registered defs.
 //   Defs are emitted in creation = dependency order.
 // - Linearity: closures are strictly linear (env q: "once"), arrays are
-//   threaded by the array scaffold and never enter env, and — a NECESSARY
-//   workaround — binders of ABSTRACT (tvar) type are also "once": the
-//   checker accepts contraction under a Data bound but book_compile dies with
-//   "Dup/Own of a non-concrete type (not compiled yet)" (prep's open-carrier
-//   limitation), so generic bodies never contract tvar-typed values and
-//   Data-bounded dup defs are not generated. Everything else contracts
-//   freely (inferred Dup/Own is a prime target).
-// - Quantities: generated binders cover all three values of the checker's
-//   use tracking. `+x` Many (Rco <=> Many at every binder), bare Lone, and
-//   `-x` NONE -- an erased param a minted body may not consume, and an
-//   erased CTOR FIELD (base's own Op is that shape). An erased field is
-//   skipped by every fold (folding consumes it), re-passed untouched by
-//   ctor rebuilds, and disqualifies its ctor from the one-word array-
-//   default path; self and +T fields stay live, since the structural fold
-//   walks the first and Rco <=> Many forbids None on the second.
+//   threaded by the array scaffold and never enter env, and binders of
+//   ABSTRACT (tvar) type are also "once": the checker refuses contraction
+//   at abstract types (verified against HEAD), so generic bodies never
+//   contract tvar-typed values. Everything else contracts freely -- since
+//   the refcount removal an extra owner of a Data value is an inferred
+//   eager deep copy (copy$) and a dominated read a borrow, and that
+//   inference is a prime target.
+// - Quantities: `+T`/Rco types and `+x` binder sigils are GONE from the
+//   language (ruling B); generated binders are bare Lone or `-x` NONE --
+//   an erased param a minted body may not consume, and an erased CTOR
+//   FIELD (base's own Op is that shape). An erased field is skipped by
+//   every fold (folding consumes it), re-passed untouched by ctor
+//   rebuilds, and disqualifies its ctor from the one-word array-default
+//   path; self fields stay live, since the structural fold walks them.
 // - Non-inferable heads (ctors, list/char/string literals, lambdas, {=})
 //   need checked positions: argument and field holes are checked; every
 //   non-word let is annotated `{v : T}` (ty_str renders any T, functions
@@ -123,11 +122,13 @@
 // - Arrays: fixed capacity = least pow2 above the literal's keys (1 slot if
 //   keyless), TOTAL over all u32 indices; defaults are one-word constants
 //   (number / K{} / single-u32-field K{lit}) so only monomorphic ADTs with
-//   such a ctor become elements; Get needs word or +T elements (plain-ADT
-//   arrays are set-swap only); keys > 65535 exercise the slab pool.
+//   such a ctor become elements; Get is WORD-ONLY (ADT arrays are
+//   set-swap only, the set's yield is the displaced owned element);
+//   keys > 65535 exercise the slab pool.
 // - F32: dyadic literals in [1/8, 32]; unified arithmetic/comparisons plus
-//   every float builtin; division uses a positive literal denominator and
-//   sqrt squares its input. f32_to_u32 is total. Negated literals atom-only.
+//   every float builtin ($-spelled op1s; atan2 is the ~/ Op2); division
+//   uses a positive literal denominator and $sqrt squares its input.
+//   $f32_to_u32 is total. Negated literals atom-only.
 // - Equality sides are IDENTICAL renderings of one synthesized term (types
 //   are erased, so occurrences there consume nothing and the sides convert
 //   trivially) — EXCEPT the ceql coin: convertible-but-DISTINCT constant
@@ -139,8 +140,9 @@
 //   (8-16 lets, deeper batch trees) to engage segment spill, slab churn and
 //   task-bag pressure that uniform small programs never touch.
 //
-// Compilation surfaces deliberately stressed: share/claim inference (dup$
-// walks, +T params, shared-ADT arrays, drops), ctor-reuse (transform defs),
+// Compilation surfaces deliberately stressed: copy$/borrow inference
+// (param and statement contraction of Data values, drops), ctor-reuse
+// (transform defs),
 // borrow-fusion (word-field reduces), closures via partial application, HOF
 // lambdas and closure-typed generic instantiation (apply$), computed-match
 // splits (fn~i), parallel-let forks in main and recursive batch trees
@@ -154,14 +156,13 @@
 // position), lambdas at COMP (`~x`) params, if/elif, tuple/Unit sugar, dependent U32
 // switches and filled asserts, dead defs/lets.
 //
-// The C-bodied effect ABI is generated at every shape book_eff admits:
-// zero, one and two owned params, a String param (io_str_read), and each
-// yield the boundary marshals (U32, Unit, Bool, Bytes). One U32 in, one U32
-// out used to be the only shape emitted, leaving every other marshalling
-// path hand-tested only -- the surface fuzz finding 070 lived on.
+// Custom C-bodied effects are NOT generated: the ratified Op ruling
+// admits only the hand-written IO::Op rows (a C-bodied def compiles only
+// when its camelized name matches an install ctor), so the old per-seed
+// effect ABI shapes and the in-process C leak probe are gone.
 //
-// The separate --io smoke mode checks generated standard-IO and custom-C
-// effects by their deterministic process output; the interpreter performs no
+// The separate --io smoke mode checks generated standard-IO programs by
+// their deterministic process output; the interpreter performs no
 // effects, so these cannot use the differential oracle. It also generates
 // CANCELLATION shapes -- timeout, race, spawn-and-drop, an explicit
 // IO::cancel on a live handle, a cancelled channel sender/receiver, and a
@@ -189,32 +190,30 @@
 // `< /dev/null` and it returns at once, silently costing that arm (output
 // is unchanged either way, so nothing fails -- it just stops covering).
 //
-// A cancel that never fires costs no output. What it costs is a leaked
-// wait-set entry or a live process, read by two checks sound in DIFFERENT
-// windows, neither subsuming the other: a per-program LEAK PROBE effect
-// spliced as main's last action (timer-heap depth + waitpid(-1, WNOHANG)
-// != ECHILD, printing a line no expected output carries), emitted only
-// when the seed left nothing deliberately parked since a live spawn makes
-// both legitimately non-zero; and the ORPHAN SWEEP after the binary exits.
-// The probe cannot see the exit teardown at all -- emit cancels the root's
-// children after it -- and the sweep only sees what outlives the process.
+// A cancel that never fires costs no output. What it costs is a live
+// process, read by the ORPHAN SWEEP after the binary exits: each
+// cancelled/held exec carries a unique marker, and anything still
+// answering to one after the binary is gone outlived the program.
 // fz_hold exists to give the sweep something to find: an UNCANCELLED exec,
 // so a live child rides every cancellation path and, under a spawn, dies
 // only if the exit teardown runs. The sweep diffs against the pids matching
 // before the binary ran, so a survivor of an earlier run of the same seed
 // is not blamed on this one (markers are seed-derived, hence stable by
-// design). Both detectors were confirmed to fire by reverting the
-// io_own_res line in exec.c (.devs/rules/effects.md law 1).
+// design). The old in-process LEAK PROBE (timer-heap depth + waitpid
+// WNOHANG spliced as main's last effect) died with the Op ruling -- it
+// was a minted C effect -- so a leaked wait-set ENTRY that never holds a
+// process is currently invisible.
 //
 // The ceiling: the loser NEVER completes, so no generated race is ever
 // CLOSE. Bugs needing two fibers to finish in the same scheduler turn are
 // out of reach by construction -- an exact-stdout oracle cannot admit a
 // nondeterministic interleaving. Not covered yet:
-// ASan/UBSan, CUDA, --no-halt, contraction at abstract types (see above;
-// the checker refuses +A at abstract A, so it is a language gap, not a
-// generator one), and recursive consumers of Ford evidence (recursion on
-// the EVIDENCE column is refused by ruling; the minted eliminators are
-// depth-bounded instead).
+// ASan/UBSan, CUDA, --no-halt, contraction at abstract types (the
+// checker refuses it, so it is a language gap, not a generator one),
+// timer-heap leak detection (the C probe died with the Op ruling), and
+// recursive consumers of Ford evidence (recursion on the EVIDENCE
+// column is refused by ruling; the minted eliminators are depth-bounded
+// instead).
 //
 // Dependent types are ONE recipe-driven kit, correct by construction
 // off pinned idioms. syn_dep mints a word-indexed family uf : U32 ->
@@ -229,8 +228,8 @@
 // (fordm), the payload type, and the Sg coupling; every instance gets a
 // word->index converter, a runtime-index builder recursing on the index
 // (the split specializes intro goals), and an eliminator -- RECURSIVE
-// when eq fields are live (as-equation identity casts move the
-// hypothesis, the opener refutes its impossible arm and crosses the
+// when eq fields are live (the split specializes the hypothesis in
+// context, the opener refutes its impossible arm and crosses the
 // tail through injectivity, descent stays structural), SHALLOW when
 // erased (evidence can neither refute nor transport, and recursing on
 // evidence is refused by ruling); by chance the index is a COMPUTED
@@ -243,9 +242,8 @@
 // would wedge the interpreter). Closure-field datatypes (clofield)
 // live outside the ADT model as dedicated intro/apply pairs.
 //
-// Arrows are foralls with quantities, chosen by the same Rco<=>Many law
-// parameters obey: fun types carry q (-> / -+> / -->), Many doms are
-// +T, and Many/None VALUES are minted defs passed by name (sigiled
+// Arrows carry quantities: fun types are -> (Lone) or --> (None,
+// erased), and None VALUES are minted defs passed by name (sigiled
 // lambda binders are not inline syntax; qfun). Dependent arrows
 // (@z: U32. F(z)) ride the dep kit as the section of a family.
 //
@@ -255,12 +253,11 @@
 // output, drop params discard it, IO<IO<T>> nests (ionest), ctor
 // fields carry actions (iowrap), and (U32 -> IO<T>) continuations
 // capture the live env (iokont). Minted do-block defs (doio) run
-// multi-bind Bnd elaboration with bare statement lines (dobare), and
-// io_opq crosses a concrete datatype OPAQUE into a C effect body (the
-// io_kind/GFX ABI). F32 stays inside the implementation-agnostic
-// fragment by construction: sqrt(e*e), positive division and literal
-// exp/log keep NaN/inf/-0.0 out of every leg (the trans ruling's
-// spirit), and new arms reuse those generators.
+// multi-bind Bnd elaboration with bare statement lines (dobare). F32
+// stays inside the implementation-agnostic fragment by construction:
+// $sqrt(e*e), positive division and literal $exp/$log keep NaN/inf/-0.0
+// out of every leg (the trans ruling's spirit), and new arms reuse
+// those generators.
 //
 // BATCHING (--batch N, default 4 outside --io). Compiling one program per
 // seed was 61% of the run, over a translation unit 89-95% identical across
@@ -292,8 +289,8 @@
 // exit codes do not merge. --profile reports the phase clock behind all of
 // this; note wall-clock measurements here swing ~2x with background load.
 //
-// Findings land in .devs/fuzz-findings/seed-N.bend (program + verdict header),
-// resource skips in fuzz-findings/skipped/.
+// Findings land in findings/seed-N.bend next to this file (program +
+// verdict header), resource skips in findings/skipped/.
 // The generator is version-controlled but findings are not: a saved program is
 // the durable artifact (a generator edit remaps every seed).
 
@@ -302,9 +299,20 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { pathToFileURL } from "node:url";
 
-const ROOT = path.join(import.meta.dirname, "..", "..");
-const FINDINGS = path.join(ROOT, ".devs", "fuzz-findings");
+// ROOT : the bend3 checkout under test -- the cwd when run from the repo
+// root, else the `bend3` sibling of this repo (the layout after the move
+// out of .devs/scripts)
+const ROOT0 = [process.cwd(), path.join(import.meta.dirname, "..", "bend3")]
+  .find((d) => fs.existsSync(path.join(d, "bend-ts", "bend.ts")));
+if (ROOT0 === undefined) {
+  console.error("cannot find the bend3 checkout: run from its repo root, or keep it as a sibling `bend3/` of this repo");
+  process.exit(1);
+}
+const ROOT: string = ROOT0;
+const BEND_TS = path.join(ROOT, "bend-ts", "bend.ts");
+const FINDINGS = path.join(import.meta.dirname, "findings");
 const WORKER_TIMEOUT = 20_000;
 const CC_TIMEOUT = 90_000;
 const RUN_TIMEOUT = 15_000;
@@ -453,7 +461,7 @@ class Gen {
 // An E is a rendered expression plus the precedence of its top operator (99 =
 // atom). MIN_PARENS is consulted ONLY here: full mode parenthesizes every
 // binary node, minimal mode only where the parser's precedence table (PREC
-// mirrors opers_all in bend-ts/src/bend.ts; every binary op is left-assoc)
+// mirrors OPRS/PREC in bend-ts/bend.ts; every binary op is left-assoc)
 // requires it. Both spellings denote the same tree — the metamorphic leg
 // relies on exactly this.
 
@@ -466,7 +474,7 @@ const PREC: Record<string, number> = {
   ".|.": 6, ".^.": 7, ".&.": 8,
   "<<": 9, ">>": 9,
   "+": 10, "-": 10,
-  "*": 11, "/": 11, "%": 11,
+  "*": 11, "/": 11, "%": 11, "~/": 11,
 };
 
 type E = { s: string; p: number; head?: string; op?: string };
@@ -500,12 +508,11 @@ export function e_fn2(op: string, x: E, y: E): E {
 }
 
 export function e_ann_bind(name: string, val: E, type: string): string {
-  const bind = type.startsWith("+") ? "+" + name : name;
   if (val.op !== "!=") {
-    return bind + " = {" + val.s + " : " + type + "}";
+    return name + " = {" + val.s + " : " + type + "}";
   }
   const raw = "an" + String(uid_next());
-  return raw + " = " + e_at(val) + "\n  " + bind + " = {" + raw + " : " + type + "}";
+  return raw + " = " + e_at(val) + "\n  " + name + " = {" + raw + " : " + type + "}";
 }
 
 // Types (the generator's mirror of the object language)
@@ -522,8 +529,7 @@ type T =
   | { k: "f32" }
   | { k: "tvar"; n: string }
   | { k: "adt"; a: Adt; args: T[] }
-  | { k: "rco"; t: T }
-  | { k: "fun"; dom: T; cod: T; q?: "many" | "none" }
+  | { k: "fun"; dom: T; cod: T; q?: "none" }
   | { k: "io"; t: T }
   | { k: "eql"; t: T; side: string };
 
@@ -595,13 +601,20 @@ export function feature_goal(k: string, goal: T): void {
 // draws land in the tail, several at once when several land. Tail hits
 // are mostly moderate (log-uniform), so throughput holds. Caps come
 // from measured walls: runtime chains are cheap to 300k on both legs;
-// LITERAL chains stop at ~180 -- the emitted C nests one bracket per
-// element and clang dies at 256, and the wall counts TOTAL nesting, so
-// the cap leaves surrounding-expression headroom
-// (repro_literal_bracket_wall.bend); dec patterns (case k+x) stop at
-// 4000 -- the checker is linear in k since the codomain-composition
-// fix, but term_higher still dies raw near k~10000
-// (repro_dec_swi_depth_crash.bend).
+// LITERAL chains used to stop at ~180 (clang's 256-bracket wall), but
+// term_cexp (bend caf5de19) binds a temp every 64 nesting levels and
+// term_lit (200bc799) compiles constant 17+-word subtrees as static
+// data, so deep literals are now stretched to the low thousands ON
+// PURPOSE -- they exercise exactly those two paths
+// (compile_literal_bracket_wall.bend pins the wall's old face); dec
+// patterns (case k+x) stop at 4000 -- the checker is linear in k since
+// the codomain-composition fix, but term_higher still dies raw near
+// k~10000. The dec peel's emitted-C nesting is flattened now (the
+// scope_name loc registry + flat leaf_inline), but book_compile still
+// RECURSES per peel and stack-overflows between k=2000 and k=3000
+// (comp_dec_switch_bracket_wall.md) -- big-k draws land a real
+// compiler-crash finding, kept on purpose until the chain compiles
+// iteratively.
 
 export function size_pick(body: number, cap: number): number {
   const lo = Math.max(1, body);
@@ -636,8 +649,7 @@ export function ty_str(t: T): string {
       }
       return t.args.length === 0 ? t.a.name : t.a.name + "<" + t.args.map(ty_str).join(",") + ">";
     }
-    case "rco": return "+" + ty_str(t.t);
-    case "fun": return "(" + ty_str(t.dom) + (t.q === "many" ? " -+> " : t.q === "none" ? " --> " : " -> ") + ty_str(t.cod) + ")";
+    case "fun": return "(" + ty_str(t.dom) + (t.q === "none" ? " --> " : " -> ") + ty_str(t.cod) + ")";
     case "io": return "IO<" + ty_str(t.t) + ">";
     case "eql": return "{" + t.side + " = " + t.side + " : " + ty_str(t.t) + "}";
   }
@@ -648,7 +660,7 @@ export function ty_key(t: T): string {
 }
 
 export function ty_bind(name: string, t: T): string {
-  return (t.k === "rco" ? "+" : "") + name + ": " + ty_str(t);
+  return name + ": " + ty_str(t);
 }
 
 export function ty_eq(a: T, b: T): boolean {
@@ -659,7 +671,6 @@ export function ty_sub(t: T, m: Map<string, T>): T {
   switch (t.k) {
     case "tvar": return m.get(t.n) ?? t;
     case "adt": return { ...t, args: t.args.map((x) => ty_sub(x, m)) };
-    case "rco": return { k: "rco", t: ty_sub(t.t, m) };
     case "fun": return { k: "fun", dom: ty_sub(t.dom, m), cod: ty_sub(t.cod, m), q: t.q };
     case "io": return { k: "io", t: ty_sub(t.t, m) };
     default: return t;
@@ -671,7 +682,6 @@ export function ty_data(t: T): boolean {
     case "u32": case "f32": case "eql": return true;
     case "tvar": return false;
     case "adt": return t.a.data !== null && t.a.data.every((i) => ty_data(t.args[i]));
-    case "rco": return ty_data(t.t);
     case "fun": case "io": return false;
   }
 }
@@ -680,7 +690,6 @@ export function ty_open(t: T): boolean {
   switch (t.k) {
     case "tvar": return true;
     case "adt": return t.args.some(ty_open);
-    case "rco": return ty_open(t.t);
     case "fun": return ty_open(t.dom) || ty_open(t.cod);
     case "io": return ty_open(t.t);
     default: return false;
@@ -701,9 +710,6 @@ export function ty_unify(pat: T, goal: T, m: Map<string, T>): boolean {
   }
   if (pat.k === "adt" && goal.k === "adt") {
     return pat.a === goal.a && pat.args.every((x, i) => ty_unify(x, goal.args[i], m));
-  }
-  if (pat.k === "rco" && goal.k === "rco") {
-    return ty_unify(pat.t, goal.t, m);
   }
   if (pat.k === "fun" && goal.k === "fun") {
     return ty_unify(pat.dom, goal.dom, m) && ty_unify(pat.cod, goal.cod, m);
@@ -782,7 +788,6 @@ export function adt_field_data(a: Adt, f: T): number[] | null {
   switch (f.k) {
     case "u32": case "f32": case "eql": return [];
     case "tvar": return [a.tvars.indexOf(f.n)];
-    case "rco": return adt_field_data(a, f.t);
     case "fun": case "io": return null;
     case "adt": {
       if (f.a === a) {
@@ -837,7 +842,7 @@ export function adt_new(): Adt {
       }
     }
     const cand = fields.map((f, i) => ({ f, i }))
-      .filter((x) => x.f.k !== "rco" && !(x.f.k === "adt" && x.f.a === a));
+      .filter((x) => !(x.f.k === "adt" && x.f.a === a));
     const er = cand.length > 0 && G.chance(0.2) ? G.pick(cand).i : -1;
     if (er >= 0) {
       feature_add("erased-field");
@@ -904,14 +909,9 @@ export function syn_ty(fuel: number, data: boolean, hole?: TyHole): T {
     [fuel > 0 ? 4 : 0, () => need_str()],
     [fuel > 0 ? 10 : 0, () => need_pair(syn_ty(fuel - 1, true, nested), syn_ty(fuel - 1, true, nested))],
     [fuel > 0 ? 5 : 0, () => need_unit()],
-    [fuel > 0 ? 8 : 0, () => {
-      const inner = syn_ty(fuel - 1, true);
-      return inner.k === "rco" ? inner : ({ k: "rco", t: inner } as T);
-    }],
     [!data && fuel > 0 ? 8 : 0, () => {
-      const q = G.wpick<"many" | "none" | undefined>([[70, undefined], [15, "many"], [15, "none"]]);
-      const base = G.pick([U32C, F32C]);
-      const dom = q === "many" ? ({ k: "rco", t: base } as T) : base;
+      const q = G.wpick<"none" | undefined>([[80, undefined], [20, "none"]]);
+      const dom = G.pick([U32C, F32C]);
       return { k: "fun", q, dom, cod: syn_ty(fuel - 1, true) } as T;
     }],
     [!data && fuel > 1 && G.chance(0.5) ? 4 : 0, () => {
@@ -923,10 +923,11 @@ export function syn_ty(fuel: number, data: boolean, hole?: TyHole): T {
 
 // V
 // -
-// q "once": closures and tvar-typed binders (strictly linear — abstract
-// contraction is the open compiler gap); q "many": everything else (words,
-// Data values — contraction inferred). not: word literals this binder can no
-// longer match (miss-binder chains). Arrays never enter env.
+// q "once": closures and tvar-typed binders (strictly linear — the checker
+// refuses contraction at abstract types); q "many": everything else (words,
+// Data values — an extra owner is an inferred copy$, a dominated read a
+// borrow). not: word literals this binder can no longer match (miss-binder
+// chains). Arrays never enter env.
 
 type V = { name: string; ty: T; q: "many" | "once" | "dead"; not?: number[] };
 
@@ -988,7 +989,7 @@ export function num_gen_u32(env: V[], fuel: number): E {
     [6, () => e_bin(num_gen_u32(env, fuel - 1), G.pick(["/", "%"]), G.chance(0.25) ? e_atom("0") : num_gen_u32(env, fuel - 1))],
     [6, () => {
       feature_add("f32");
-      return e_fn1("f32_to_u32", num_gen_f32(env, fuel - 1));
+      return e_fn1("$f32_to_u32", num_gen_f32(env, fuel - 1));
     }],
     [4, () => {
       feature_add("f32cmp");
@@ -1004,7 +1005,7 @@ export function num_gen_u32(env: V[], fuel: number): E {
         return num_gen_u32(env, 1);
       }
       if (t.k === "f32") {
-        return e_fn1("f32_to_u32", num_gen_f32(env, 1));
+        return e_fn1("$f32_to_u32", num_gen_f32(env, 1));
       }
       feature_add("fold");
       return e_atom(rd_ensure(t) + "(" + e_at(syn(t, env, 1)) + ")");
@@ -1030,7 +1031,7 @@ export function num_gen_f32(env: V[], fuel: number): E {
     [26, () => num_lit_f32(false)],
     [vars.length > 0 ? 12 : 0, () => e_atom(G.pick(vars).name)],
     [4, () => num_lit_f32(true)],
-    [15, () => e_fn1("u32_to_f32", num_gen_u32(env, 0))],
+    [15, () => e_fn1("$u32_to_f32", num_gen_u32(env, 0))],
     [40, () => e_bin(num_gen_f32(env, fuel - 1), G.pick(["+", "-", "*"]), num_gen_f32(env, fuel - 1))],
     [8, () => {
       feature_add("fdiv");
@@ -1038,24 +1039,24 @@ export function num_gen_f32(env: V[], fuel: number): E {
     }],
     [8, () => {
       const e = num_gen_f32(env, fuel - 1);
-      return e_fn1("sqrt", e_bin(e, "*", e));
+      return e_fn1("$sqrt", e_bin(e, "*", e));
     }],
-    [4, () => e_fn1("floor", num_gen_f32(env, fuel - 1))],
+    [4, () => e_fn1("$floor", num_gen_f32(env, fuel - 1))],
     [5, () => {
       feature_add("trans");
-      return e_fn1(G.pick(["sin", "cos", "tanh"]), num_gen_f32(env, fuel - 1));
+      return e_fn1(G.pick(["$sin", "$cos", "$tanh"]), num_gen_f32(env, fuel - 1));
     }],
     [2, () => {
       feature_add("trans");
-      return e_fn1("exp", num_lit_f32(false));
+      return e_fn1("$exp", num_lit_f32(false));
     }],
     [2, () => {
       feature_add("trans");
-      return e_fn1("log", num_lit_f32(false));
+      return e_fn1("$log", num_lit_f32(false));
     }],
     [3, () => {
       feature_add("trans");
-      return e_fn2("atan2", num_gen_f32(env, fuel - 1), num_gen_f32(env, fuel - 1));
+      return e_bin(num_gen_f32(env, fuel - 1), "~/", num_gen_f32(env, fuel - 1));
     }],
   ])();
 }
@@ -1134,8 +1135,8 @@ export function str_lit(n: number): string {
 // Syn
 // ---
 // syn(goal, env, fuel): produce a term of type goal. Productions per goal
-// head: matching env vars (with rco coercions — the elaborator inserts the
-// share/claim), intro forms, unifying registry calls, on-demand minted defs.
+// head: matching env vars, intro forms, unifying registry calls, on-demand
+// minted defs.
 // Results may be intro-headed (non-inferable) — callers placing them in an
 // INFER position (a bare let) must annotate; every field/argument hole here
 // is a checked position.
@@ -1145,18 +1146,10 @@ export function syn(goal: T, env: V[], fuel: number): E {
     return syn_form(goal, env, fuel);
   }
   const direct = env.filter((v) => v.q !== "dead" && ty_eq(v.ty, goal));
-  const coerce = env.filter((v) =>
-    v.q !== "dead" && !ty_eq(v.ty, goal)
-    && ((goal.k === "rco" && ty_eq(v.ty, goal.t)) || (v.ty.k === "rco" && ty_eq(v.ty.t, goal))));
   const var_w = direct.length > 0 ? 30 : 0;
-  const co_w = coerce.length > 0 ? 8 : 0;
   const uni_w = fuel >= 1 ? 8 : 0;
   const mint_w = fuel >= 2 && MINTS < 8 ? 4 : 0;
   const pick_var = (): E => e_atom(env_take(G.pick(direct)));
-  const pick_co = (): E => {
-    feature_add(goal.k === "rco" ? "share" : "claim");
-    return e_atom(env_take(G.pick(coerce)));
-  };
   const uni = (): E | null => syn_call_unify(goal, env, fuel);
   switch (goal.k) {
     case "u32": {
@@ -1176,13 +1169,6 @@ export function syn(goal: T, env: V[], fuel: number): E {
         }
       }
       throw new Error("no inhabitant for tvar " + goal.n);
-    }
-    case "rco": {
-      return G.wpick<() => E>([
-        [var_w, pick_var],
-        [co_w, pick_co],
-        [30, () => syn(goal.t, env, fuel)],
-      ])();
     }
     case "adt": {
       const a = goal.a;
@@ -1206,10 +1192,9 @@ export function syn(goal: T, env: V[], fuel: number): E {
       const is_list = a === LISTA && !is_str;
       return G.wpick<() => E>([
         [var_w, pick_var],
-        [co_w, pick_co],
         [30, intro],
         [is_list && fuel > 0 ? 20 : 0, () => {
-          const n = size_pick(G.int(5), 160);
+          const n = size_pick(G.int(5), 2500);
           const els: string[] = [];
           for (let i = 0; i < n; i++) {
             els.push(e_at(syn(goal.args[0], env, 0)));
@@ -1219,9 +1204,9 @@ export function syn(goal: T, env: V[], fuel: number): E {
         [is_str ? 40 : 0, () => {
           IMPORTS.add("String");
           if (G.chance(0.25)) {
-            return e_atom("'" + str_char() + "' <> " + str_lit(size_pick(1 + G.int(6), 180)));
+            return e_atom("'" + str_char() + "' <> " + str_lit(size_pick(1 + G.int(6), 2000)));
           }
-          return e_atom(str_lit(size_pick(G.int(9), 180)));
+          return e_atom(str_lit(size_pick(G.int(9), 2000)));
         }],
         [a === CHARA ? 30 : 0, () => e_atom("'" + str_char() + "'")],
         [a.rec && fuel > 0 && !ty_open(goal) ? 22 : 0, () => {
@@ -1241,20 +1226,18 @@ export function syn(goal: T, env: V[], fuel: number): E {
     case "fun": {
       const lam = (): E => {
         const b = "y" + String(uid_next());
-        if (goal.q === "many" || goal.q === "none") {
+        if (goal.q === "none") {
           feature_add("qfun");
           const name = "qf" + String(uid_next());
-          const sig = (goal.q === "many" ? "+" : "-") + b + ": " + ty_str(goal.dom);
-          const benv2 = goal.q === "many" ? [v_many(b, goal.dom)] : [];
-          DEFS.push("def " + name + "(" + sig + ") -> " + ty_str(goal.cod) + ":\n  "
-            + e_at(syn(goal.cod, benv2, Math.min(Math.max(0, fuel - 1), 2))));
+          DEFS.push("def " + name + "(-" + b + ": " + ty_str(goal.dom) + ") -> " + ty_str(goal.cod) + ":\n  "
+            + e_at(syn(goal.cod, [], Math.min(Math.max(0, fuel - 1), 2))));
           return e_atom(name);
         }
         const benv = env.concat([v_many(b, goal.dom)]);
         if (!ty_data(goal.dom)) {
           benv[benv.length - 1].q = "once";
         }
-        return e_atom((goal.dom.k === "rco" ? "+" : "") + b + " => " + e_at(syn(goal.cod, benv, Math.min(fuel, 1))));
+        return e_atom(b + " => " + e_at(syn(goal.cod, benv, Math.min(fuel, 1))));
       };
       return G.wpick<() => E>([
         [var_w, pick_var],
@@ -1264,7 +1247,7 @@ export function syn(goal: T, env: V[], fuel: number): E {
             d.tps.length === 0 && d.ps.length >= 1
             && ty_eq(d.ps[d.ps.length - 1], goal.dom) && ty_eq(d.ret, goal.cod)
             && (d.mask?.[d.ps.length - 1] ?? null) === null
-            && d.er !== d.ps.length - 1 && d.ps[d.ps.length - 1].k !== "rco");
+            && d.er !== d.ps.length - 1);
           if (cands.length === 0) {
             return lam();
           }
@@ -1278,6 +1261,9 @@ export function syn(goal: T, env: V[], fuel: number): E {
     case "eql": {
       feature_add("eql");
       return e_atom("{=}");
+    }
+    case "io": {
+      throw new Error("io goals never reach syn (io_val owns them)");
     }
   }
 }
@@ -1343,13 +1329,7 @@ export function syn_mint_def(goal: T, env: V[]): E | null {
 }
 
 export function syn_plain_ty(fuel: number): T {
-  for (let i = 0; i < 4; i++) {
-    const t = syn_ty(fuel, true);
-    if (t.k !== "rco") {
-      return t;
-    }
-  }
-  return U32C;
+  return syn_ty(fuel, true);
 }
 
 export function syn_form_ok(goal: T): boolean {
@@ -1362,7 +1342,7 @@ export function syn_form(goal: T, env: V[], fuel: number): E {
     [18, () => syn_comp(goal, env, fuel)],
     [18, () => syn_open(goal, env, fuel)],
     [16, () => syn_assert(goal, env, fuel)],
-    [ty_data(goal) && goal.k !== "rco" ? 16 : 0, () => syn_dep(goal, env, fuel)],
+    [ty_data(goal) ? 16 : 0, () => syn_dep(goal, env, fuel)],
     [10, () => syn_ford(goal, env, fuel)],
     [8, () => syn_clofield(goal, env, fuel)],
     [14, () => syn_lib(goal, env, fuel)],
@@ -1385,7 +1365,7 @@ export function syn_if(goal: T, env: V[], fuel: number): E {
 export function syn_comp(goal: T, env: V[], fuel: number): E {
   feature_goal("comp", goal);
   const name = "cp" + String(uid_next());
-  const dom = ty_data(goal) && goal.k !== "rco" && G.chance(0.5) ? goal : syn_plain_ty(1);
+  const dom = ty_data(goal) && G.chance(0.5) ? goal : syn_plain_ty(1);
   const z = "z" + String(uid_next());
   const captures = env.filter((v) => v.q === "many");
   const words = captures.filter((v) => v.ty.k === "u32");
@@ -1421,7 +1401,7 @@ export function syn_comp(goal: T, env: V[], fuel: number): E {
 
 export function syn_open(goal: T, env: V[], fuel: number): E {
   feature_goal("open", goal);
-  const fst = ty_data(goal) && goal.k !== "rco" ? goal : syn_plain_ty(1);
+  const fst = ty_data(goal) ? goal : syn_plain_ty(1);
   const snd = syn_plain_ty(1);
   const pair = need_pair(fst, snd);
   const unit = need_unit();
@@ -1443,7 +1423,7 @@ export function syn_assert(goal: T, env: V[], fuel: number): E {
   const id = String(uid_next());
   const proof = "as" + id;
   const use = "au" + id;
-  const witness = ty_data(goal) && goal.k !== "rco" && G.chance(0.5) ? goal : syn_plain_ty(1);
+  const witness = ty_data(goal) && G.chance(0.5) ? goal : syn_plain_ty(1);
   // bodiless : the assert and its FILL are one unit -- a fill must sit
   // in the same file as its assertion, and the module split cuts
   // between entries
@@ -1535,12 +1515,12 @@ export function syn_lib(goal: T, env: V[], fuel: number): E {
 // pinned per ctor by eq fields (LIVE or ERASED), a word->index
 // converter, a runtime-index builder recursing on the index (the split
 // specializes each arm's goal, so intro needs no transport), and an
-// eliminator. Live eq: single-def RECURSIVE elimination -- the match's
-// as-equation casts the hypothesis through an annotated identity
-// ({(%en (w => w)) : (F(n) -> F(Ns{p}))}), the opener refutes its
-// impossible arm through the discriminator motive and crosses the tail
-// to the smaller index through injectivity, and the recursive call
-// descends structurally. Erased eq: evidence cannot refute or
+// eliminator. Live eq: single-def RECURSIVE elimination -- the split
+// specializes the hypothesis's type in the arm's own context (the old
+// as-equation identity-cast hop is ill-typed now, not just redundant),
+// the opener refutes its impossible arm through the discriminator
+// motive and crosses the tail to the smaller index through injectivity,
+// and the recursive call descends structurally. Erased eq: evidence cannot refute or
 // transport, so the reader is the SHALLOW match (recursing on evidence
 // is refused by ruling). Recipe axes: eq erasure, a second passthrough
 // index, payload type, and a dependent-pair coupling that eliminates
@@ -1585,16 +1565,21 @@ export function syn_ford(goal: T, env: V[], fuel: number): E {
     const D = "fd" + id;
     DEFS.push("def " + D + "(x: " + N + ", zc: Type, sc: Type) -> Type:\n  match x:\n    case " + Z + "{}:\n      zc\n    case " + S + "{p}:\n      sc");
     const sz = "fr" + id;
-    DEFS.push("def " + sz + "(p: " + N + ", e: {" + S + "{p} = " + Z + "{} : " + N + "}) -> Empty:\n  %e : " + D + "(_, Unit, Empty)\n  U{}");
+    DEFS.push("def " + sz + "(p: " + N + ", e: {" + S + "{p} = " + Z + "{} : " + N + "}) -> Empty:\n  %e : w => " + D + "(w, Unit, Empty)\n  U{}");
     const pr = "fp" + id;
     DEFS.push("def " + pr + "(n: " + N + ") -> " + N + ":\n  match n:\n    case " + Z + "{}:\n      " + Z + "{}\n    case " + S + "{p}:\n      p");
     const inj = "fj" + id;
-    DEFS.push("def " + inj + "(a: " + N + ", b: " + N + ", e: {" + S + "{a} = " + S + "{b} : " + N + "}) -> {a = b : " + N + "}:\n  %e : {" + pr + "(_) = b : " + N + "}\n  {=}");
+    DEFS.push("def " + inj + "(a: " + N + ", b: " + N + ", e: {" + S + "{a} = " + S + "{b} : " + N + "}) -> {a = b : " + N + "}:\n  %e : w => {" + pr + "(w) = b : " + N + "}\n  {=}");
     const ops = midx ? "(p: " + N + ", m: U32, vv: " + fat(S + "{p}") + ")" : "(p: " + N + ", vv: " + fat(S + "{p}") + ")";
-    DEFS.push("def " + V + "o" + ops + " -> (U32 & " + fat("p") + "):\n  match vv:\n    case " + VZ + "{eq, w}:\n      absurd((U32 & " + fat("p") + "), " + sz + "(p, eq))\n    case " + VS + "{q, x, t, eq}:\n      ("
+    DEFS.push("def " + V + "o" + ops + " -> (U32 & " + fat("p") + "):\n  match vv:\n    case " + VZ + "{eq, w}:\n      Empty::absurd((U32 & " + fat("p") + "), " + sz + "(p, eq))\n    case " + VS + "{q, x, t, eq}:\n      ("
       + pc("x") + ", ({(%" + inj + "(p, q, eq) (w => w)) : (" + fat("q") + " -> " + fat("p") + ")})(t))");
+    // split : the checker's split specializes v's type to fat(S{p}) in
+    // the arm's context by itself now, so the old as-equation identity
+    // cast ({(%en (w => w)) : fat(n) -> fat(S{p})})(v) is not just
+    // unnecessary but ill-typed -- v is used direct; the as-equation
+    // stays bound as syntax coverage
     DEFS.push("def " + V + "e" + eps + " -> U32:\n  match n as en:\n    case " + Z + "{}:\n      "
-      + String(G.int(64)) + "\n    case " + S + "{p}:\n      pr = " + V + "o(" + eargs("p", "({(%en (w => w)) : (" + fat("n") + " -> " + fat(S + "{p}") + ")})(v)") + ")\n      match pr:\n        case (x, t2):\n          (x + " + V + "e(" + eargs("p", "t2") + "))");
+      + String(G.int(64)) + "\n    case " + S + "{p}:\n      pr = " + V + "o(" + eargs("p", "v") + ")\n      match pr:\n        case (x, t2):\n          (x + " + V + "e(" + eargs("p", "t2") + "))");
   }
   if (!erased && !midx && P.k === "u32" && G.chance(0.25)) {
     // vapp : the index is a COMPUTED term -- append answers Vc(ad(a,b)),
@@ -1604,7 +1589,7 @@ export function syn_ford(goal: T, env: V[], fuel: number): E {
     const ad = "fa" + id;
     DEFS.push("def " + ad + "(a: " + N + ", b: " + N + ") -> " + N + ":\n  match a:\n    case " + Z + "{}:\n      b\n    case " + S + "{p}:\n      " + S + "{" + ad + "(p, b)}");
     const ap = V + "p";
-    DEFS.push("def " + ap + "(a: " + N + ", b: " + N + ", x: " + V + "(a), y: " + V + "(b)) -> " + V + "(" + ad + "(a, b)):\n  match a as ea:\n    case " + Z + "{}:\n      y\n    case " + S + "{p}:\n      pp = " + V + "o(p, ({(%ea (w => w)) : (" + V + "(a) -> " + V + "(" + S + "{p}))})(x))\n      match pp:\n        case (hv, tv):\n          " + VS + "{" + ad + "(p, b), hv, " + ap + "(p, b, tv, y), {=}}");
+    DEFS.push("def " + ap + "(a: " + N + ", b: " + N + ", x: " + V + "(a), y: " + V + "(b)) -> " + V + "(" + ad + "(a, b)):\n  match a as ea:\n    case " + Z + "{}:\n      y\n    case " + S + "{p}:\n      pp = " + V + "o(p, x)\n      match pp:\n        case (hv, tv):\n          " + VS + "{" + ad + "(p, b), hv, " + ap + "(p, b, tv, y), {=}}");
     const uu = "fv" + id;
     DEFS.push("def " + uu + "(k: U32, j: U32) -> U32:\n  na = " + toN + "(k % 4)\n  nb = " + toN + "(j % 4)\n  " + V + "e(" + ad + "(na, nb), " + ap + "(na, nb, " + V + "b(na), " + V + "b(nb)))");
     DEFR.push({ name: uu, tps: [], ps: [U32C, U32C], ret: U32C });
@@ -1651,7 +1636,7 @@ export function syn_dep(goal: T, env: V[], fuel: number): E {
   const id = String(uid_next());
   const fam = "uf" + id;
   const pick = "up" + id;
-  const left = goal.k !== "rco" && ty_data(goal) ? goal : syn_plain_ty(1);
+  const left = ty_data(goal) ? goal : syn_plain_ty(1);
   let right = syn_plain_ty(1);
   for (let i = 0; i < 4 && ty_eq(left, right); i++) {
     right = syn_plain_ty(1);
@@ -1768,20 +1753,7 @@ export function rd_ensure(t: T): string {
       break;
     }
     case "f32": {
-      DEFS.push("def " + name + "(x: F32) -> U32:\n  f32_to_u32(x * " + num_lit_f32(false).s + ")");
-      break;
-    }
-    case "rco": {
-      const inner = t.t;
-      if (inner.k === "u32") {
-        DEFS.push("def " + name + "(" + ty_bind("x", t) + ") -> U32:\n  x + x * " + String(2 + G.int(9)));
-      } else if (inner.k === "f32") {
-        DEFS.push("def " + name + "(" + ty_bind("x", t) + ") -> U32:\n  f32_to_u32(x * " + num_lit_f32(false).s + ")");
-      } else if (inner.k === "adt") {
-        DEFS.push(rd_match(name, inner, t, key));
-      } else {
-        DEFS.push("def " + name + "(" + ty_bind("x", t) + ") -> U32:\n  7");
-      }
+      DEFS.push("def " + name + "(x: F32) -> U32:\n  $f32_to_u32(x * " + num_lit_f32(false).s + ")");
       break;
     }
     case "adt": {
@@ -1789,10 +1761,9 @@ export function rd_ensure(t: T): string {
       break;
     }
     case "fun": {
-      const dk = t.dom.k === "rco" ? t.dom.t : t.dom;
-      const arg = dk.k === "f32" ? num_lit_f32(false) : num_lit_u32();
+      const arg = t.dom.k === "f32" ? num_lit_f32(false) : num_lit_u32();
       const app = e_atom("f(" + arg.s + ")");
-      const res = t.cod.k === "f32" ? e_fn1("f32_to_u32", app) : t.cod.k === "u32" ? app : e_atom(rd_ensure(t.cod) + "(" + app.s + ")");
+      const res = t.cod.k === "f32" ? e_fn1("$f32_to_u32", app) : t.cod.k === "u32" ? app : e_atom(rd_ensure(t.cod) + "(" + app.s + ")");
       DEFS.push("def " + name + "(f: " + ty_str(t) + ") -> U32:\n  " + e_at(res));
       break;
     }
@@ -1822,7 +1793,7 @@ export function rd_deep(name: string, t: T & { k: "adt" }, param: T, selfkey: st
       return e_atom(v);
     }
     if (ft.k === "f32") {
-      return e_fn1("f32_to_u32", e_bin(e_atom(v), "*", num_lit_f32(false)));
+      return e_fn1("$f32_to_u32", e_bin(e_atom(v), "*", num_lit_f32(false)));
     }
     const fkey = "rd:" + ty_key(ft);
     return e_atom((fkey === selfkey || (f.k === "adt" && f.a === a) ? name : rd_ensure(ft)) + "(" + v + ")");
@@ -1876,7 +1847,7 @@ export function rd_match(name: string, t: T & { k: "adt" }, param: T, selfkey: s
         return [e_atom(vs[i])];
       }
       if (ft.k === "f32") {
-        return [e_fn1("f32_to_u32", e_bin(e_atom(vs[i]), "*", num_lit_f32(false)))];
+        return [e_fn1("$f32_to_u32", e_bin(e_atom(vs[i]), "*", num_lit_f32(false)))];
       }
       const fkey = "rd:" + ty_key(ft);
       const fname = fkey === selfkey || (f.k === "adt" && f.a === a) ? name : rd_ensure(ft);
@@ -2098,7 +2069,7 @@ export function match_body(env: V[], depth: number, ind: number): string {
             return [e_atom(vs[i])];
           }
           if (ft.k === "f32") {
-            return [e_fn1("f32_to_u32", e_atom(vs[i]))];
+            return [e_fn1("$f32_to_u32", e_atom(vs[i]))];
           }
           return [e_atom(rd_ensure(ft) + "(" + vs[i] + ")")];
         })
@@ -2303,7 +2274,7 @@ export function shared_ensure_user(): string {
   const name = "us" + String(uid_next());
   SHUSER = name;
   const henv: V[] = [v_many("s", U32C), v_many("k", U32C)];
-  DEFS.push("def " + name + "(+s: +U32, k: U32) -> U32:\n  " + e_at(num_combine([e_atom("s"), e_atom("s"), num_gen_u32(henv, 1)])));
+  DEFS.push("def " + name + "(s: U32, k: U32) -> U32:\n  " + e_at(num_combine([e_atom("s"), e_atom("s"), num_gen_u32(henv, 1)])));
   return name;
 }
 
@@ -2344,7 +2315,7 @@ export function let_value(env: V[]): Line {
   if (t.k === "u32") {
     return let_scalar(env);
   }
-  feature_add(t.k === "rco" ? "share" : t.k === "fun" ? "clo" : "value");
+  feature_add(t.k === "fun" ? "clo" : "value");
   const x = "v" + String(uid_next());
   const y = "v" + String(uid_next());
   const val = MINTS < 8 && G.chance(0.4) ? syn_mint_def(t, env) ?? syn(t, env, 2 + G.int(2)) : syn(t, env, size_pick(2 + G.int(2), 7));
@@ -2424,7 +2395,11 @@ export function let_eql(env: V[]): Line {
   if (safe && G.chance(0.35)) {
     feature_add("rwte");
     const w = "v" + String(uid_next());
-    const mot = G.chance(0.4) ? x + " : U32 " : " " + x + " ";
+    // mot : a motive is a FUNCTION now (lhs-type -> Type), so the
+    // constant motive is a constant lambda; its body parse is greedy (a
+    // following parenthesized term reads as its application), so the
+    // explicit form needs the `;` separator
+    const mot = G.chance(0.4) ? x + " : mw" + String(uid_next()) + " => U32; " : " " + x + " ";
     return { text: etext + "\n  " + w + " = {(%" + mot + e_at(num_gen_u32(env, 1)) + ") : U32}", binds: [w], vars: [v_many(w, U32C)] };
   }
   return { text: etext, binds: [], vars: [], eqs: safe ? [x] : [] };
@@ -2474,14 +2449,10 @@ export function let_array(env: V[]): Line {
   const able = ADTS.filter((x) =>
     x.tvars.length === 0 && x.dep !== true && x.data !== null
     && x.ctors.some((c) => c.er < 0 && (c.fields.length === 0 || (c.fields.length === 1 && c.fields[0].k === "u32"))));
-  const mode = G.wpick<string>([[55, "u32"], [able.length > 0 ? 25 : 0, "adt"], [able.length > 0 ? 20 : 0, "shadt"]]);
+  const mode = G.wpick<string>([[60, "u32"], [able.length > 0 ? 40 : 0, "adt"]]);
   const a = mode === "u32" ? null : G.pick(able);
   const elT: T = a !== null ? { k: "adt", a, args: [] } : U32C;
-  const shared = mode === "shadt";
-  if (shared) {
-    feature_add("sharr");
-  }
-  const tyArr = "[:" + (shared ? "+" : "") + ty_str(elT) + "]";
+  const tyArr = "[:" + ty_str(elT) + "]";
   const wrap = (e: E): string => (e.p === 99 ? e.s : "(" + e.s + ")");
   const elV = (): string => {
     const v = syn(elT, env, a !== null ? 1 : 0);
@@ -2496,7 +2467,7 @@ export function let_array(env: V[]): Line {
   }
   const maxk = keys.length > 0 ? keys[keys.length - 1] : 0;
   const len = maxk < 8 ? 8 : 2 ** (32 - Math.clz32(maxk));
-  const lit = "[" + keys.map((k) => String(k) + ":" + elV()).join(", ") + "; " + dflt + "; " + String(len) + "]";
+  const lit = "[" + keys.map((k) => String(k) + ": " + elV() + ", ").join("") + "_: " + dflt + "; " + String(len) + "]";
   let cur = "ar" + String(uid_next());
   const lines: string[] = [cur + " = {" + lit + " : " + tyArr + "}"];
   const binds: string[] = [];
@@ -2519,22 +2490,21 @@ export function let_array(env: V[]): Line {
     const ren = G.chance(0.5);
     const nxt = ren ? "ar" + String(uid_next()) : cur;
     const at = ren ? cur + "@" + nxt : cur;
-    const dstr = a !== null && (mode === "adt" || G.chance(0.5));
-    if (!dstr && G.chance(0.5)) {
+    // get : Get is word-only (the refcount removal's gate), so element
+    // reads happen on u32 arrays alone; an ADT array is set/swap only,
+    // and the SET's yield -- the displaced old element, owned -- is what
+    // gets folded
+    if (a === null && G.chance(0.5)) {
       const x = "v" + String(uid_next());
       lines.push(x + " = " + at + "[" + idx() + "]");
-      binds.push(a !== null ? rd_ensure({ k: "rco", t: elT }) + "(" + x + ")" : x);
-      vars.push(v_many(x, a === null ? U32C : { k: "rco", t: elT }));
+      binds.push(x);
+      vars.push(v_many(x, U32C));
     } else {
       const x = G.chance(0.2) ? "_" : "v" + String(uid_next());
       lines.push(x + " = " + at + "[" + idx() + "] <- " + elV());
       if (x !== "_") {
-        if (a !== null) {
-          binds.push((shared ? rd_ensure({ k: "rco", t: elT }) : rd_ensure(elT)) + "(" + x + ")");
-        } else {
-          binds.push(x);
-        }
-        vars.push(v_many(x, a === null ? U32C : shared ? { k: "rco", t: elT } : elT));
+        binds.push(a !== null ? rd_ensure(elT) + "(" + x + ")" : x);
+        vars.push(v_many(x, elT));
       }
     }
     cur = nxt;
@@ -2547,7 +2517,7 @@ export function let_float(env: V[]): Line {
   const f = "f" + String(uid_next());
   const x = "v" + String(uid_next());
   const val = num_gen_f32(env, 2 + G.int(2));
-  const rhs = G.chance(0.7) ? e_fn1("f32_to_u32", e_atom(f)) : e_bin(e_atom(f), G.pick(["<", "<=", ">=", "!=", "=="]), num_gen_f32(env, 2));
+  const rhs = G.chance(0.7) ? e_fn1("$f32_to_u32", e_atom(f)) : e_bin(e_atom(f), G.pick(["<", "<=", ">=", "!=", "=="]), num_gen_f32(env, 2));
   return { text: e_ann_bind(f, val, "F32") + "\n  " + x + " = " + e_at(rhs), binds: [x], vars: [v_many(f, F32C), v_many(x, U32C)] };
 }
 
@@ -2637,6 +2607,10 @@ export function let_truth(env: V[]): Line {
   };
 }
 
+// let_shared : contraction on purpose -- an extra owner of a Data value
+// is an inferred deep copy (copy$), a read under a dominating owner a
+// borrow. The def's param is used twice (param contraction) and the
+// binder feeds both that call and a direct fold (statement contraction).
 export function let_shared(env: V[]): Line {
   feature_add("share");
   const s = "sh" + String(uid_next());
@@ -2647,25 +2621,25 @@ export function let_shared(env: V[]): Line {
     feature_add("shp");
     const a = G.pick(able);
     const dt: T = { k: "adt", a, args: [] };
-    const rdp = rd_ensure({ k: "rco", t: dt });
+    const rdp = rd_ensure(dt);
     const us = "us" + String(uid_next());
-    DEFS.push("def " + us + "(+s: +" + a.name + ", k: U32) -> U32:\n  " + e_at(num_combine([e_atom(rdp + "(s)"), e_atom(rdp + "(s)"), e_atom("k")])));
+    DEFS.push("def " + us + "(s: " + a.name + ", k: U32) -> U32:\n  " + e_at(num_combine([e_atom(rdp + "(s)"), e_atom(rdp + "(s)"), e_atom("k")])));
     const val = syn(dt, env, 2);
     const lines = [
-      "+" + s + " = {" + val.s + " : +" + a.name + "}",
+      e_ann_bind(s, val, a.name),
       x + " = " + us + "(" + s + ", " + e_at(num_gen_u32(env, 1)) + ")",
       y + " = " + rdp + "(" + s + ") + " + x,
     ];
-    return { text: lines.join("\n  "), binds: [x, y], vars: [v_many(s, { k: "rco", t: dt }), v_many(x, U32C), v_many(y, U32C)] };
+    return { text: lines.join("\n  "), binds: [x, y], vars: [v_many(s, dt), v_many(x, U32C), v_many(y, U32C)] };
   }
   const us = shared_ensure_user();
   const val = num_gen_u32(env, 2);
   const lines = [
-    e_ann_bind(s, val, "+U32"),
+    s + " = " + e_at(val),
     x + " = " + us + "(" + s + ", " + e_at(num_gen_u32(env, 1)) + ")",
     y + " = " + s + " + " + x,
   ];
-  return { text: lines.join("\n  "), binds: [x, y], vars: [v_many(s, { k: "rco", t: U32C }), v_many(x, U32C), v_many(y, U32C)] };
+  return { text: lines.join("\n  "), binds: [x, y], vars: [v_many(s, U32C), v_many(x, U32C), v_many(y, U32C)] };
 }
 
 // Gen
@@ -2693,6 +2667,31 @@ export function gen_reset(seed: bigint, minParens: boolean, uid0 = 0): void {
   MINTS = 0;
   DEFR = [];
   FEAT = {};
+}
+
+// mod_names : the top-level names a DECLS/DEFS entry defines (the assert
+// name and its fill share one name; ctor tags are NOT collected -- they
+// resolve bare across imports)
+export function mod_names(entry: string): string[] {
+  const m = entry.match(/^(?:def|type|assert) ([A-Za-z0-9_:]+)/);
+  return m === null ? [] : [m[1].replace(/:+$/, "")];
+}
+
+// mod_qualify : rewrite whole-identifier occurrences of moved names to
+// their <mod>::<name> spelling, skipping string/char/backtick literals
+export function mod_qualify(text: string, map: Map<string, string>): string {
+  if (map.size === 0) {
+    return text;
+  }
+  const lit = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'|`[^`]`/g;
+  const sub = (s: string): string => s.replace(/[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*/g, (w) => map.get(w) ?? w);
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(lit)) {
+    out += sub(text.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + sub(text.slice(last));
 }
 
 export type GenParts = { imps: string[]; decls: string[]; defs: string[]; seal: string; raw: string };
@@ -2759,9 +2758,9 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
         feature_add("eqkit");
         IMPORTS.add("Equal");
         eqs.push(G.wpick<string>([
-          [3, "sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + ")"],
-          [2, "trans(" + t.N + ", " + az + ", " + rhs + ", " + az + ", " + e0 + ", sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + "))"],
-          [2, "cong(" + t.N + ", " + t.N + ", y => " + t.s + "{y}, " + az + ", " + rhs + ", " + e0 + ")"],
+          [3, "Equal::sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + ")"],
+          [2, "Equal::trans(" + t.N + ", " + az + ", " + rhs + ", " + az + ", " + e0 + ", Equal::sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + "))"],
+          [2, "Equal::cong(" + t.N + ", " + t.N + ", y => " + t.s + "{y}, " + az + ", " + rhs + ", " + e0 + ")"],
         ]));
       } else {
         eqs.push(e0);
@@ -2781,20 +2780,15 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
   }
 
   const res = "r" + String(uid_next());
-  // fin : the combine chunks through intermediates past 64 names -- a
-  // single left fold over ~300 names nests as many parens in the
-  // emitted C, repro_literal_bracket_wall's expression face
-  let combined = names.map((n) => e_atom(n));
-  while (combined.length > 64) {
-    const chunk = combined.slice(0, 64);
-    combined = combined.slice(64);
-    const rc = "rc" + String(uid_next());
-    lines.push(rc + " = " + e_at(num_combine(chunk)));
-    combined.push(e_atom(rc));
-  }
+  // fin : one flat left fold -- the old 64-name chunking through rc
+  // intermediates dodged clang's bracket wall, which term_cexp now
+  // handles in the emitter (a temp every 64 levels)
+  const combined = names.map((n) => e_atom(n));
   const fin = res + " = " + e_at(num_combine(combined.concat([num_gen_u32(env, 1)])));
+  // rlines : an explicit motive ends in `;` -- the motive term parse is
+  // greedy and would swallow a parenthesized next line as application
   const rlines = eqs.slice(0, 2).map((e) =>
-    G.chance(0.3) ? "%" + e + " : U32" : "% " + e);
+    G.chance(0.3) ? "%" + e + " : mw" + String(uid_next()) + " => U32;" : "% " + e);
   const seal = e_at(num_seal(res));
   const fun = G.chance(0.7);
   const imps = ["List", "Char", "String", "Pair", "Unit", "Bool", "Empty", "Equal"].filter((m) => IMPORTS.has(m)).map((m) => "import " + m);
@@ -2802,11 +2796,20 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
   // mods : the book splits across SIBLING FILES -- all decls and a prefix
   // of the defs move out (defs are pushed in dependency order, so a
   // prefix is closed), m2 imports m1 and main imports both: relative
-  // ids, transitive loads, cross-file ctors and calls. Bare names
-  // resolve across the import, which is what makes the move sound
+  // ids, transitive loads, cross-file ctors and calls. Imports never
+  // bind bare content names -- only ctor tags travel -- so every
+  // cross-file reference to a moved type or def is rewritten to its
+  // qualified <mod>::<name> spelling (names are uid-unique, making
+  // word-boundary replacement outside string/char literals sound).
   const files: Record<string, string> = {};
-  const nmod = DEFS.length >= 2 && !flat ? size_pick(G.chance(0.25) ? 1 + G.int(2) : 0, 6) : 0;
+  // monads : a do-block derives M::bind from the monad TYPE's spelled
+  // name, so the type and its ::-named defs cannot straddle a file
+  // boundary; a seed that minted a monad skips the split whole (the
+  // prefix cut knows nothing about group boundaries)
+  const monadic = DEFS.some((d) => (mod_names(d)[0] ?? "").includes("::"));
+  const nmod = DEFS.length >= 2 && !flat && !monadic ? size_pick(G.chance(0.25) ? 1 + G.int(2) : 0, 6) : 0;
   const mods: string[] = [];
+  const qmap = new Map<string, string>();
   let mdecls = DECLS;
   let mdefs = DEFS;
   if (nmod > 0) {
@@ -2815,14 +2818,17 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
     const head = imps.length > 0 ? imps.join("\n") + "\n\n" : "";
     for (let i = 0; i < nmod; i++) {
       const id = "./fm" + String(seed % 1000n) + "_" + String(uid_next());
-      const take = i === 0 ? DEFS.slice(0, cut) : DEFS.slice(cut * i, cut * (i + 1));
-      const decl = i === 0 ? DECLS.join("\n\n") + (DECLS.length > 0 ? "\n\n" : "") : "";
+      const take = (i === 0 ? DEFS.slice(0, cut) : DEFS.slice(cut * i, cut * (i + 1))).map((d) => mod_qualify(d, qmap));
+      const decls = i === 0 ? DECLS : [];
       const sib = mods.length > 0 ? mods.map((m) => "import " + m).join("\n") + "\n\n" : "";
-      files[id] = "# fuzz module\n\n" + head + sib + decl + take.join("\n\n") + "\n";
+      files[id] = "# fuzz module\n\n" + head + sib + decls.join("\n\n") + (decls.length > 0 ? "\n\n" : "") + take.join("\n\n") + "\n";
+      for (const nm of decls.concat(take).flatMap(mod_names)) {
+        qmap.set(nm, id.slice(2) + "::" + nm);
+      }
       mods.push(id);
     }
     mdecls = [];
-    mdefs = DEFS.slice(cut * nmod);
+    mdefs = DEFS.slice(cut * nmod).map((d) => mod_qualify(d, qmap));
   }
   // lex : layout is meaning-free, so it varies -- comment lines between
   // entries and extra blank runs. The min-parens metamorphic sibling
@@ -2838,7 +2844,7 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
     return G.wpick<string>([[40, "\n\n"], [20, "\n\n\n"], [25, "\n\n# fz " + String(G.int(1024)) + "\n"], [15, "\n\n#\n\n"]]);
   };
   const source = (last: string, kind: string): string => {
-    const main = (fun ? "def main() -> U32:\n  " : "main : U32 =\n  ") + body(last);
+    const main = mod_qualify((fun ? "def main() -> U32:\n  " : "main : U32 =\n  ") + body(last), qmap);
     const parts = (imps.length > 0 || mods.length > 0
       ? [imps.concat(mods.map((m) => "import " + m)).join("\n")]
       : []).concat(mdecls).concat(mdefs).concat([main]);
@@ -2857,7 +2863,7 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
 // --
 
 type IoProgram = { src: string; files: Record<string, string>; out: string; feats: string[]; marks: string[]; code: number };
-type IoCtx = { key: string; files: Record<string, string>; helps: Set<string>; marks: string[]; alive: boolean; opq?: { ty: string; eff: string; gen: string; sum: number } };
+type IoCtx = { key: string; files: Record<string, string>; helps: Set<string>; marks: string[]; alive: boolean };
 type IoTerm = { s: string; out: string[] };
 
 // IO_HELPS : The cancellation shapes below all keep the exact-stdout oracle by
@@ -2892,14 +2898,14 @@ const IO_HELPS: Record<string, { src: string; imps: string[] }> = {
   // owns a live subtree, so cancelling it must take both
   fz_wait: {
     src: "def fz_wait<A>(x: IO<A>) -> IO<A>:\n"
-      + "  IO::bind<Task<A>, A>(IO::fork<A>(x), t => IO::join<A>(t))",
+      + "  IO::bind<IO::Task<A>, A>(IO::fork<A>(x), t => IO::join<A>(t))",
     imps: [],
   },
   // fz_kill : the explicit Cancel op: consume the handle by cancelling instead of
   // joining (Task is linear -- exactly one of the two)
   fz_kill: {
     src: "def fz_kill<A>(x: IO<A>) -> IO<Unit>:\n"
-      + "  IO::bind<Task<A>, Unit>(IO::fork<A>(x), t =>\n"
+      + "  IO::bind<IO::Task<A>, Unit>(IO::fork<A>(x), t =>\n"
       + "    IO::bind<Bool, Unit>(IO::cancel<A>(t), b => IO::pure<Unit>(U{})))",
     imps: ["Unit", "Bool"],
   },
@@ -2920,11 +2926,14 @@ const IO_HELPS: Record<string, { src: string; imps: string[] }> = {
     imps: ["Unit", "Result", "String", "Pair", "Bytes"],
   },
   // fz_prod : producer half of fz_pipe: the second send parks on the full buffer
-  // until a recv drains it, so the receiver wakes a parked SENDER
+  // until a recv drains it, so the receiver wakes a parked SENDER.
+  // The channel helpers are MONOMORPHIC (U32 elements): a channel value
+  // fans out freely only at a concrete type -- Chan<A> at abstract A
+  // cannot contract, and every helper here uses c more than once.
   fz_prod: {
-    src: "def fz_prod<A>(c: Chan<A>, v: A, w: A) -> IO<Unit>:\n"
-      + "  IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<A>(c, v), r1 =>\n"
-      + "    IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<A>(c, w), r2 =>\n"
+    src: "def fz_prod(c: Chan<U32>, v: U32, w: U32) -> IO<Unit>:\n"
+      + "  IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<U32>(c, v), r1 =>\n"
+      + "    IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<U32>(c, w), r2 =>\n"
       + "      IO::pure<Unit>(U{})))",
     imps: ["Unit", "Result", "String", "Pair", "IO/Chan"],
   },
@@ -2934,31 +2943,31 @@ const IO_HELPS: Record<string, { src: string; imps: string[] }> = {
   // receiver, a recv waking a parked sender) and, after the close, the
   // end-of-stream Fail and the send-to-closed drop.
   fz_pipe: {
-    src: "def fz_pipe<A>(v: A, w: A) -> IO<Unit>:\n"
-      + "  IO::bind<Chan<A>, Unit>(Chan::new<A>(1), c =>\n"
-      + "    IO::bind<Unit, Unit>(IO::spawn(fz_prod<A>(c, v, w)), u =>\n"
-      + "      IO::bind<Result<(U32 & String), A>, Unit>(Chan::recv<A>(c), r1 =>\n"
-      + "        IO::bind<Result<(U32 & String), A>, Unit>(Chan::recv<A>(c), r2 =>\n"
-      + "          IO::bind<Bool, Unit>(Chan::close<A>(c), b =>\n"
-      + "            IO::bind<Result<(U32 & String), A>, Unit>(Chan::recv<A>(c), r3 =>\n"
+    src: "def fz_pipe(v: U32, w: U32) -> IO<Unit>:\n"
+      + "  IO::bind<Chan<U32>, Unit>(Chan::new<U32>(1), c =>\n"
+      + "    IO::bind<Unit, Unit>(IO::spawn(fz_prod(c, v, w)), u =>\n"
+      + "      IO::bind<Result<(U32 & String), U32>, Unit>(Chan::recv<U32>(c), r1 =>\n"
+      + "        IO::bind<Result<(U32 & String), U32>, Unit>(Chan::recv<U32>(c), r2 =>\n"
+      + "          IO::bind<Bool, Unit>(Chan::close<U32>(c), b =>\n"
+      + "            IO::bind<Result<(U32 & String), U32>, Unit>(Chan::recv<U32>(c), r3 =>\n"
       + "              IO::pure<Unit>(U{})))))))",
     imps: ["Unit", "Bool", "Result", "String", "Pair", "IO/Chan"],
   },
   // fz_recv : a receiver cancelled while parked on an empty channel (reg/349)
   fz_recv: {
-    src: "def fz_recv<A>() -> IO<Unit>:\n"
-      + "  IO::bind<Chan<A>, Unit>(Chan::new<A>(1), c =>\n"
-      + "    IO::bind<Unit, Unit>(fz_tmo<Result<(U32 & String), A>>(Chan::recv<A>(c)), u =>\n"
-      + "      IO::bind<Bool, Unit>(Chan::close<A>(c), b => IO::pure<Unit>(U{}))))",
+    src: "def fz_recv() -> IO<Unit>:\n"
+      + "  IO::bind<Chan<U32>, Unit>(Chan::new<U32>(1), c =>\n"
+      + "    IO::bind<Unit, Unit>(fz_tmo<Result<(U32 & String), U32>>(Chan::recv<U32>(c)), u =>\n"
+      + "      IO::bind<Bool, Unit>(Chan::close<U32>(c), b => IO::pure<Unit>(U{}))))",
     imps: ["Unit", "Bool", "Result", "String", "Pair", "IO/Chan"],
   },
   // fz_send : a sender cancelled while parked on a full one
   fz_send: {
-    src: "def fz_send<A>(v: A, w: A) -> IO<Unit>:\n"
-      + "  IO::bind<Chan<A>, Unit>(Chan::new<A>(1), c =>\n"
-      + "    IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<A>(c, v), r =>\n"
-      + "      IO::bind<Unit, Unit>(fz_tmo<Result<(U32 & String), Unit>>(Chan::send<A>(c, w)), u =>\n"
-      + "        IO::bind<Bool, Unit>(Chan::close<A>(c), b => IO::pure<Unit>(U{})))))",
+    src: "def fz_send(v: U32, w: U32) -> IO<Unit>:\n"
+      + "  IO::bind<Chan<U32>, Unit>(Chan::new<U32>(1), c =>\n"
+      + "    IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<U32>(c, v), r =>\n"
+      + "      IO::bind<Unit, Unit>(fz_tmo<Result<(U32 & String), Unit>>(Chan::send<U32>(c, w)), u =>\n"
+      + "        IO::bind<Bool, Unit>(Chan::close<U32>(c), b => IO::pure<Unit>(U{})))))",
     imps: ["Unit", "Bool", "Result", "String", "Pair", "IO/Chan"],
   },
 };
@@ -2972,7 +2981,7 @@ export function io_help(ctx: IoCtx, name: string): string {
     IMPORTS.add(m);
   }
   for (const other of Object.keys(IO_HELPS)) {
-    if (other !== name && IO_HELPS[name].src.includes(other + "<")) {
+    if (other !== name && (IO_HELPS[name].src.includes(other + "<") || IO_HELPS[name].src.includes(other + "("))) {
       io_help(ctx, other);
     }
   }
@@ -3100,79 +3109,11 @@ export function io_print(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   };
 }
 
-// EffShape : The C-bodied effect ABI, every shape book_eff admits: zero/one/many
-// owned params, a String param (io_str_read), and each yield kind the
-// boundary can marshal. Only "one U32 in, one U32 out" used to be
-// generated, so every other marshalling path was reachable by hand
-// only -- and that is the surface fuzz finding 070 lived on.
-type EffShape = {
-  tag: string;
-  ps: string[];              // Bend param types, in order
-  yield: string;             // Bend yield type
-  cps: string;               // C parameter list after State st
-  body: (shown: number) => string;
-  ret: string;               // the C return expression
-  word: boolean;             // yields a U32 the caller may keep in scope
-};
-
-const EFF_SHAPES: EffShape[] = [
-  { tag: "u32-u32", ps: ["U32"], yield: "U32", cps: ", Term value", word: true,
-    body: (n) => "  printf(\"%u\\n\", (u32)" + String(n) + "u);\n", ret: "value" },
-  { tag: "nil-u32", ps: [], yield: "U32", cps: "", word: true,
-    body: (n) => "  printf(\"%u\\n\", (u32)" + String(n) + "u);\n", ret: "W32(0u)" },
-  { tag: "two-u32", ps: ["U32", "U32"], yield: "U32", cps: ", Term a, Term b", word: true,
-    body: (n) => "  (void)a;\n  printf(\"%u\\n\", (u32)" + String(n) + "u);\n",
-    ret: "W32((u32)term_loc(a) ^ (u32)term_loc(b))" },
-  { tag: "str-u32", ps: ["String"], yield: "U32", cps: ", Term text", word: true,
-    body: () => "  u64 len = 0;\n  char* buf = io_str_read(st, text, &len);\n"
-      + "  printf(\"%u\\n\", (u32)len);\n  free(buf);\n", ret: "W32((u32)len)" },
-  { tag: "u32-unit", ps: ["U32"], yield: "Unit", cps: ", Term value", word: false,
-    body: (n) => "  (void)value;\n  printf(\"%u\\n\", (u32)" + String(n) + "u);\n", ret: "io_unit(st)" },
-  { tag: "u32-bool", ps: ["U32"], yield: "Bool", cps: ", Term value", word: false,
-    body: (n) => "  printf(\"%u\\n\", (u32)" + String(n) + "u);\n", ret: "io_bool(st, (u32)term_loc(value) & 1u)" },
-  { tag: "u32-bytes", ps: ["U32"], yield: "Bytes", cps: ", Term value", word: false,
-    body: (n) => "  (void)value;\n  printf(\"%u\\n\", (u32)" + String(n) + "u);\n",
-    ret: "io_bytes_make(st, \"fz\", 2)" },
-];
-
-export function io_ffi(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
-  feature_goal("ffi", goal);
-  const name = "fx" + ctx.key + "_" + String(uid_next());
-  const shown = G.int(4294967296);
-  const sh = EFF_SHAPES[G.int(EFF_SHAPES.length)];
-  feature_add("eff-" + sh.tag);
-  const args = sh.ps.map((t) => t === "String"
-    ? "\"" + "fz".repeat(1 + G.int(6)) + "\""
-    : e_at(syn(U32C, env, 1)));
-  if (sh.ps.includes("String")) {
-    IMPORTS.add("String");
-  }
-  if (sh.yield === "Bytes") {
-    IMPORTS.add("Bytes");
-  }
-  if (sh.yield === "Bool") {
-    IMPORTS.add("Bool");
-  }
-  if (sh.yield === "Unit") {
-    need_unit();
-  }
-  const decl = sh.ps.map((t, i) => "p" + String(i) + ": " + t).join(", ");
-  DEFS.push("def " + name + "(" + decl + ") -> IO<" + sh.yield + ">:\n  import ./" + name + ".c");
-  ctx.files["./" + name + ".c"] = "static Term io_" + name + "(State st" + sh.cps + ") {\n"
-    + "  (void)st;\n" + sh.body(shown) + "  return " + sh.ret + ";\n}\n";
-  const x = "io" + String(uid_next());
-  // rest : a non-word yield binds and drops (affine): keeping it out of env
-  // means the type model never has to spell Bytes or Bool
-  const rest = io_syn(goal, sh.word ? env.concat([v_many(x, U32C)]) : env, fuel - 1, ctx);
-  const printed = sh.ps.includes("String")
-    ? String(args[sh.ps.indexOf("String")].length - 2)
-    : String(shown);
-  return {
-    s: "IO::bind<" + sh.yield + "," + ty_str(goal) + ">(" + name + "(" + args.join(", ") + "), "
-      + x + " => " + rest.s + ")",
-    out: [printed].concat(rest.out),
-  };
-}
+// io_ffi is DEAD: the ratified Op ruling admits only the hand-written
+// IO::Op rows -- a C-bodied def compiles only when its camelized name
+// matches an install Op ctor, so per-seed minted effects (and the C
+// leak probe that rode the same ABI) cannot compile anymore. The
+// marshalling boundary is covered by the base ops the other arms drive.
 
 export function io_fork(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   feature_goal("forkio", goal);
@@ -3185,7 +3126,7 @@ export function io_fork(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const inner = "IO::bind<" + ty_str(yielded) + "," + ty_str(goal) + ">(IO::join<"
     + ty_str(yielded) + ">(" + task + "), " + value + " => " + rest.s + ")";
   return {
-    s: "IO::bind<Task<" + ty_str(yielded) + ">," + ty_str(goal) + ">(IO::fork<"
+    s: "IO::bind<IO::Task<" + ty_str(yielded) + ">," + ty_str(goal) + ">(IO::fork<"
       + ty_str(yielded) + ">(" + child_io.s + "), " + task + " => " + inner + ")",
     out: child_io.out.concat(rest.out),
   };
@@ -3234,25 +3175,23 @@ export function io_eff(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
 
 export function io_pipe(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   feature_goal("pipeio", goal);
-  const el = syn_ty(1, true);
   const cap2 = env.filter((v) => v.q === "many").map((v) => ({ ...v }));
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_pipe") + "<" + ty_str(el) + ">("
-      + e_at(syn(el, cap2, 1)) + ", " + e_at(syn(el, cap2, 1)) + "), " + x + " => " + rest.s + ")",
+    s: "IO::bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_pipe") + "("
+      + e_at(num_gen_u32(cap2, 1)) + ", " + e_at(num_gen_u32(cap2, 1)) + "), " + x + " => " + rest.s + ")",
     out: rest.out,
   };
 }
 
 export function io_chan(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   feature_goal("chanio", goal);
-  const el = syn_ty(1, true);
   const cap = env.filter((v) => v.q === "many").map((v) => ({ ...v }));
   const send = G.chance(0.5);
   const call = send
-    ? io_help(ctx, "fz_send") + "<" + ty_str(el) + ">(" + e_at(syn(el, cap, 1)) + ", " + e_at(syn(el, cap, 1)) + ")"
-    : io_help(ctx, "fz_recv") + "<" + ty_str(el) + ">()";
+    ? io_help(ctx, "fz_send") + "(" + e_at(num_gen_u32(cap, 1)) + ", " + e_at(num_gen_u32(cap, 1)) + ")"
+    : io_help(ctx, "fz_recv") + "()";
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
@@ -3293,58 +3232,6 @@ export function io_do(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   DEFS.push("def " + name + "(" + caps.map((v) => v.name + ": U32").join(", ") + ") -> IO<" + g + ">:\n  do IO<" + g + ">:\n"
     + lines.join("\n") + "\n    {" + fin.s + " : IO<" + g + ">}");
   return { s: name + "(" + caps.map((v) => v.name).join(", ") + ")", out: outs.flat() };
-}
-
-// io_opq : a concrete Data-kinded datatype crossing the effect boundary
-// OPAQUE (prepare io_kind, the GFX ABI): the C side receives the raw Term
-// and consumes the fields with the refcount-dispatching take; literal
-// fields keep the exact-stdout oracle
-export function io_opq(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
-  feature_goal("opq", goal);
-  if (ctx.opq === undefined) {
-    const ty = "Oq" + ctx.key;
-    const eff = "fo" + ctx.key;
-    DECLS.push("type " + ty + ":\n  " + ty + "a{f0: U32, f1: U32}");
-    DEFS.push("def " + eff + "(v: " + ty + ") -> IO<U32>:\n  import ./" + eff + ".c");
-    ctx.files["./" + eff + ".c"] = "// opaque Data term across the C boundary (io_kind): consume the\n"
-      + "// fields with the refcount-dispatching take, drop the node, print\n"
-      + "// and yield the sum (rules/effects.md; GFX blit is the exemplar)\n"
-      + "static Term io_" + eff + "(State st, Term v) {\n"
-      + "  Term a;\n  Term b;\n"
-      + "  alloc_drop(st, term_ctr_take_2(st, v, &a, &b), 2);\n"
-      + "  u32 n = term_val(a) + term_val(b);\n"
-      + "  printf(\"%u\\n\", n);\n"
-      + "  return W32(n);\n}\n";
-    const gen = "fg" + ctx.key;
-    const g1 = G.int(65536);
-    const g2 = G.int(65536);
-    DEFS.push("def " + gen + "() -> IO<" + ty + ">:\n  import ./" + gen + ".c");
-    ctx.files["./" + gen + ".c"] = "// opaque Data term BUILT C-side (io_kind, the gfx_events\n"
-      + "// direction): the emitted per-ctor builder mints the node whole\n"
-      + "static Term io_" + gen + "(State st) {\n"
-      + "  return term_ctr_" + ty.toLowerCase() + "_" + ty.toLowerCase() + "a(st, 0, W32(" + String(g1) + "u), W32(" + String(g2) + "u));\n}\n";
-    ctx.opq = { ty, eff, gen, sum: (g1 + g2) >>> 0 };
-  }
-  if (G.chance(0.4)) {
-    // opqgen : C builds, Bend carries, C consumes -- the full roundtrip
-    feature_add("opqgen");
-    const t = "ot" + String(uid_next());
-    const x = "io" + String(uid_next());
-    const rest = io_syn(goal, env.concat([v_many(x, U32C)]), fuel - 1, ctx);
-    return {
-      s: "IO::bind<" + ctx.opq.ty + "," + ty_str(goal) + ">(" + ctx.opq.gen + "(), " + t + " => IO::bind<U32," + ty_str(goal) + ">(" + ctx.opq.eff + "(" + t + "), " + x + " => " + rest.s + "))",
-      out: [String(ctx.opq.sum)].concat(rest.out),
-    };
-  }
-  const l1 = G.int(65536);
-  const l2 = G.int(65536);
-  const x = "io" + String(uid_next());
-  const rest = io_syn(goal, env.concat([v_many(x, U32C)]), fuel - 1, ctx);
-  return {
-    s: "IO::bind<U32," + ty_str(goal) + ">(" + ctx.opq.eff + "(" + ctx.opq.ty + "a{" + String(l1) + ", " + String(l2) + "}), "
-      + x + " => " + rest.s + ")",
-    out: [String((l1 + l2) >>> 0)].concat(rest.out),
-  };
 }
 
 // io_val : an IO VALUE, built and not yet executed -- its out is what
@@ -3516,9 +3403,8 @@ export function io_syn(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   }
   return G.wpick<() => IoTerm>([
     [18, () => io_pure(goal, env, Math.min(fuel, 2))],
-    [22, () => io_print(goal, env, fuel, ctx)],
-    [22, () => io_ffi(goal, env, fuel, ctx)],
-    [20, () => io_fork(goal, env, fuel, ctx)],
+    [26, () => io_print(goal, env, fuel, ctx)],
+    [22, () => io_fork(goal, env, fuel, ctx)],
     [13, () => io_timeout(goal, env, fuel, ctx)],
     [13, () => io_race(goal, env, fuel, ctx)],
     [9, () => io_spawn(goal, env, fuel, ctx)],
@@ -3527,10 +3413,9 @@ export function io_syn(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
     [11, () => io_chan(goal, env, fuel, ctx)],
     [11, () => io_pipe(goal, env, fuel, ctx)],
     [10, () => io_eff(goal, env, fuel, ctx)],
-    [12, () => io_do(goal, env, fuel, ctx)],
-    [8, () => io_opq(goal, env, fuel, ctx)],
-    [13, () => io_first(goal, env, fuel, ctx)],
-    [13, () => io_base(goal, env, fuel, ctx)],
+    [14, () => io_do(goal, env, fuel, ctx)],
+    [15, () => io_first(goal, env, fuel, ctx)],
+    [15, () => io_base(goal, env, fuel, ctx)],
   ])();
 }
 
@@ -3550,30 +3435,12 @@ export function gen_io_program(seed: bigint): IoProgram {
   const ctx: IoCtx = { key, files: {}, helps: new Set(), marks: [], alive: false };
   const action = io_syn(yielded, [], 3, ctx);
   const value = "io" + String(uid_next());
-  // probe : the leak probe reads wait sets that must be EMPTY at this point, so
-  // it is only sound when nothing is deliberately still parked: a seed
-  // that spawned a live fiber reports through the orphan sweep alone
-  const probe = ctx.alive ? "" : "fzlk" + key;
-  if (probe !== "") {
-    DEFS.push("def " + probe + "() -> IO<U32>:\n  import ./" + probe + ".c");
-    ctx.files["./" + probe + ".c"] = "#include <errno.h>\n#include <sys/wait.h>\n\n"
-      + "// every wait set must be empty and no child may be left once the\n"
-      + "// cancelled branches are reclaimed; a leak prints a line no\n"
-      + "// expected output carries (.devs/rules/effects.md)\n"
-      + "static Term io_" + probe + "(State st) {\n"
-      + "  (void)st;\n"
-      + "  u32 n = (u32)io_timers_len;\n"
-      + "  errno = 0;\n"
-      + "  if (waitpid(-1, NULL, WNOHANG) != -1 || errno != ECHILD) {\n"
-      + "    n += 1000;\n"
-      + "  }\n"
-      + "  if (n != 0) {\n"
-      + "    printf(\"LEAK %u\\n\", n);\n"
-      + "  }\n"
-      + "  return W32(n);\n"
-      + "}\n";
-  }
-  const tail = probe === "" ? "" : "    lk" + String(uid_next()) + " <- " + probe + "()\n";
+  // The in-process LEAK PROBE (timer-heap depth + waitpid(WNOHANG) as a
+  // last effect) died with the Op ruling: it was a minted C effect, and
+  // only hand-written Op rows compile. A leaked timer entry is invisible
+  // now; a leaked PROCESS is still caught by the orphan sweep outside
+  // the binary.
+  const tail = "";
   // dies : Die is the one Op that reclaims NOTHING on its way out -- no cancel
   // walk at all -- so whatever the seed left running rides entirely on
   // io_run's exit teardown. Paired with a live spawn it is the only
@@ -3600,30 +3467,36 @@ export function gen_io_program(seed: bigint): IoProgram {
 // Worker
 // ------
 // `fuzz.ts --worker`: JSON-line protocol on stdin/stdout. One request loads
-// (book_load with a base/-serving reader), checks (halt ON), normalizes main
-// on the interpreter, and emits the C. Verdicts: reject (checker refused),
-// skip (resource limit: stack overflow or check fuel), crash (internal error
-// in load/check/normalize/compile on a generated program — a finding), ok.
+// (parse_book with a base/-serving reader), checks (halt ON), normalizes main
+// on the interpreter, and emits the C. Verdicts: reject (BendError: the
+// checker refused), skip (resource limit: stack overflow), crash (internal
+// error in load/check/normalize/compile on a generated program — a finding),
+// ok.
 
 type WorkerMode = "full" | "interp" | "compile";
-type WorkerReq = { id: number; src: string; base: string; mode: WorkerMode; files?: Record<string, string>; elab?: boolean };
-type WorkerRes = { id: number; verdict: "ok" | "reject" | "skip" | "crash"; out?: string; csrc?: string; err?: string; stage?: string; ms?: number; elab?: "abstain" };
+type WorkerReq = { id: number; src: string; base: string; mode: WorkerMode; files?: Record<string, string> };
+type WorkerRes = { id: number; verdict: "ok" | "reject" | "skip" | "crash"; out?: string; csrc?: string; err?: string; stage?: string; ms?: number };
 
 export async function worker_main(): Promise<void> {
-  const bend = await import("../../bend-ts/src/bend.ts");
-  const comp = await import("../../bend-ts/src/compile.ts");
+  const bend = await import(pathToFileURL(BEND_TS).href);
+  // BendErr : the dynamic import types as any, so name the class once to
+  // get instanceof narrowing back
+  const BendErr = bend.BendError as new () => Error & { err: never };
   const err_str = (e: unknown): string => {
     if (typeof e === "string") {
       return e;
     }
+    if (e instanceof BendErr) {
+      try {
+        return bend.err_show(e.err);
+      } catch {
+        return "unshowable checker error: " + e.message;
+      }
+    }
     if (e instanceof Error) {
       return e.constructor.name + ": " + e.message;
     }
-    try {
-      return bend.err_show(e as never);
-    } catch {
-      return "unshowable checker error";
-    }
+    return String(e);
   };
   const base_read = (id: string, kind: string): string | null => {
     const p = path.join(ROOT, "bend-base", id + (kind === "Bend" ? ".bend" : ""));
@@ -3633,97 +3506,79 @@ export async function worker_main(): Promise<void> {
     return fs.readFileSync(p, "utf8");
   };
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
-  rl.on("line", (l: string) => {
+  // handle : requests are strictly one-in-flight per worker (the pool
+  // dispatches the next only after the reply), so an async handler
+  // cannot interleave
+  const handle = async (l: string): Promise<void> => {
     const req = JSON.parse(l) as WorkerReq;
     const reply = (r: WorkerRes): void => {
       process.stdout.write(JSON.stringify(r) + "\n");
     };
-    const is_fuel = (e: unknown): boolean => typeof e === "object" && e !== null && (e as { t?: string }).t === "NoFuel";
+    const reader = (id: string, kind: string): string | null => {
+      if (id === req.base && kind === "Bend") {
+        return req.src;
+      }
+      return req.files?.[id] ?? base_read(id, kind);
+    };
+    const read = async (id: string): Promise<string | null> => reader(id, "Bend");
+    // book_check elaborates IN PLACE, and elaboration carries meaning
+    // (truth bridges), so the CHECKED book is both what normalizes and
+    // what book_compile consumes -- exactly the CLI's path
     let book;
-    let loaded;
     try {
-      loaded = bend.book_load(req.base, (id, kind) => {
-        if (id === req.base && kind === "Bend") {
-          return req.src;
-        }
-        return req.files?.[id] ?? base_read(id, kind);
-      });
-      book = bend.book_check(loaded, true);
+      book = await bend.parse_book(req.base, read);
+      bend.book_check(book, true);
     } catch (e) {
       if (e instanceof RangeError) {
         reply({ id: req.id, verdict: "skip", stage: "check-stack-overflow", err: err_str(e) });
-      } else if (is_fuel(e)) {
-        reply({ id: req.id, verdict: "skip", stage: "check-fuel", err: err_str(e) });
-      } else if (e instanceof Error) {
-        reply({ id: req.id, verdict: "crash", stage: "check", err: err_str(e) });
-      } else {
+      } else if (e instanceof bend.BendError) {
         reply({ id: req.id, verdict: "reject", err: err_str(e) });
+      } else {
+        reply({ id: req.id, verdict: "crash", stage: "check", err: err_str(e) });
       }
       return;
     }
     if (req.mode === "compile") {
       try {
-        const csrc = comp.book_compile(book, req.base.slice(2), req.src);
+        const csrc = bend.book_compile(book, req.base.slice(2), req.src, reader);
         reply({ id: req.id, verdict: "ok", csrc });
       } catch (e) {
         reply({ id: req.id, verdict: "crash", stage: "compile", err: err_str(e) });
       }
       return;
     }
-    const evaluate = (bk: typeof book): string => {
-      const m = bk.entries.get("main");
-      if (m === undefined || m.$ !== "Def") {
-        throw new Error("no main Def after check");
-      }
-      return bend.term_show(bk, bend.term_snf(bk, m.v)).trim();
-    };
     let out: string;
     const t0 = performance.now();
     try {
-      out = evaluate(loaded);
+      const m = book.entries["main"];
+      if (m === undefined || m.$ !== "Func" || m.v === undefined) {
+        throw new Error("no main Func after check");
+      }
+      out = bend.term_show(bend.term_snf(book, m.v)).trim();
     } catch (e) {
       if (e instanceof RangeError) {
         reply({ id: req.id, verdict: "skip", stage: "interp-stack-overflow", err: err_str(e) });
-      } else if (is_fuel(e)) {
-        reply({ id: req.id, verdict: "skip", stage: "interp-fuel", err: err_str(e) });
       } else {
         reply({ id: req.id, verdict: "crash", stage: "interp", err: err_str(e) });
       }
       return;
     }
     const ms = Math.round(performance.now() - t0);
-    let elab: "abstain" | undefined;
-    if (req.elab === true) {
-      try {
-        book.fuel = { max: 10_000_000, use: 0 };
-        const eout = evaluate(book);
-        if (eout !== out) {
-          reply({ id: req.id, verdict: "crash", stage: "elab-diverge", err: "parsed-book interp: " + out + "\nelab-book interp:   " + eout });
-          return;
-        }
-      } catch (e) {
-        if (is_fuel(e) || e instanceof RangeError) {
-          elab = "abstain";
-        } else {
-          reply({ id: req.id, verdict: "crash", stage: "interp-elab", err: err_str(e) });
-          return;
-        }
-      } finally {
-        book.fuel = undefined;
-      }
-    }
     if (req.mode === "interp") {
-      reply({ id: req.id, verdict: "ok", out, ms, elab });
+      reply({ id: req.id, verdict: "ok", out, ms });
       return;
     }
     let csrc: string;
     try {
-      csrc = comp.book_compile(book, req.base.slice(2), req.src);
+      csrc = bend.book_compile(book, req.base.slice(2), req.src, reader);
     } catch (e) {
       reply({ id: req.id, verdict: "crash", stage: "comp", err: err_str(e) });
       return;
     }
-    reply({ id: req.id, verdict: "ok", out, csrc, ms, elab });
+    reply({ id: req.id, verdict: "ok", out, csrc, ms });
+  };
+  rl.on("line", (l: string) => {
+    void handle(l);
   });
 }
 
@@ -3822,8 +3677,8 @@ class Pool {
     w.proc.stdin?.write(JSON.stringify(req) + "\n");
   }
 
-  run(src: string, base: string, mode: WorkerMode, files?: Record<string, string>, elab?: boolean): Promise<WorkerRes> {
-    const req: WorkerReq = { id: this.nextId++, src, base, mode, files, elab };
+  run(src: string, base: string, mode: WorkerMode, files?: Record<string, string>): Promise<WorkerRes> {
+    const req: WorkerReq = { id: this.nextId++, src, base, mode, files };
     return new Promise((resolve) => {
       const w = this.workers.find((x) => !x.busy);
       if (w !== undefined) {
@@ -3863,11 +3718,18 @@ export function leg_exec(cmd: string, args: string[], cwd: string, timeout: numb
 const OPT = "-O" + cli_opt("--opt", "3");
 const CC_FLAGS = [OPT, "-w", "-fno-slp-vectorize", "-DPAR_BACKEND=0", "-DNUM_THREADS=" + String(THREADS)];
 
+// file_link : the compiler's own `//! link` line (file_flags in bend.ts):
+// extra link flags an effect body asked for ride into every leg
+export function file_link(csrc: string): string[] {
+  const m = csrc.match(/^\/\/! link (.+)$/m);
+  return m === null ? [] : m[1].split(" ").filter((s) => s !== "");
+}
+
 export async function leg_c(dir: string, base: string, csrc: string, want = 0): Promise<{ kind: "ok" | "skip" | "fail"; out: string; why?: string }> {
   const cfile = path.join(dir, base + ".c");
   const bin = path.join(dir, base + "_cpu");
   fs.writeFileSync(cfile, csrc);
-  const cc = await phase("clang", () => leg_exec("clang", [...CC_FLAGS, cfile, "-lpthread", "-lm", "-o", bin], dir, CC_TIMEOUT));
+  const cc = await phase("clang", () => leg_exec("clang", [...CC_FLAGS, cfile, "-lpthread", "-lm", ...file_link(csrc), "-o", bin], dir, CC_TIMEOUT));
   if (!cc.ok) {
     return cc.timeout
       ? { kind: "skip", out: "", why: "cc-timeout" }
@@ -3889,7 +3751,8 @@ let metal_lock: Promise<void> = Promise.resolve();
 export function leg_metal(dir: string, base: string, want = 0): Promise<{ kind: "ok" | "skip" | "fail"; out: string; why?: string }> {
   const go = async (): Promise<{ kind: "ok" | "skip" | "fail"; out: string; why?: string }> => {
     const cfile = base + ".c";
-    const cc = await phase("metal-clang", () => leg_exec("clang", [OPT, "-w", "-fno-slp-vectorize", "-x", "objective-c", "-fobjc-arc", "-DPAR_BACKEND=1", cfile, "-framework", "Metal", "-framework", "Foundation", "-lpthread", "-o", base + "_gpu"], dir, METAL_CC_TIMEOUT));
+    const csrc = fs.readFileSync(path.join(dir, cfile), "utf8");
+    const cc = await phase("metal-clang", () => leg_exec("clang", [OPT, "-w", "-fno-slp-vectorize", "-x", "objective-c", "-fobjc-arc", "-DPAR_BACKEND=1", cfile, "-framework", "Metal", "-framework", "Foundation", "-lpthread", ...file_link(csrc), "-o", base + "_gpu"], dir, METAL_CC_TIMEOUT));
     if (!cc.ok) {
       return cc.timeout ? { kind: "skip", out: "", why: "metal-cc-timeout" } : { kind: "fail", out: "", why: "METAL COMPILE FAILURE:\n" + cc.err.slice(0, 2000) };
     }
@@ -3920,7 +3783,7 @@ export function save_file(sub: string, seed: bigint, header: string[], src: stri
 }
 
 export function save_finding(seed: bigint, kind: string, detail: string[], src: string): string {
-  return save_file("", seed, ["FUZZ FINDING kind=" + kind, "repro: node .devs/scripts/fuzz.ts 1 --seed " + String(seed) + (WITH_METAL ? " --metal" : "") + (WITH_IO ? " --io" : ""), ...detail], src);
+  return save_file("", seed, ["FUZZ FINDING kind=" + kind, "repro: bun " + import.meta.filename + " 1 --seed " + String(seed) + (WITH_METAL ? " --metal" : "") + (WITH_IO ? " --io" : ""), ...detail], src);
 }
 
 export function save_aux(files: Record<string, string>): void {
@@ -3977,7 +3840,6 @@ type Verdict = { kind: "ok" | "skip" | "fail"; note?: string };
 const tally = { ok: 0, skip: 0, fail: 0 };
 const feat_tally: Record<string, number> = {};
 const skip_why: Record<string, number> = {};
-let elab_abstains = 0;
 let TMP = "";
 let pool: Pool;
 
@@ -4226,12 +4088,11 @@ export async function test_one(seed: bigint, collect?: { seed: bigint; want: str
   } else {
     tally_feats(feats);
     // mode : a batched non-fuzzy member's compiled leg is the merged binary's,
-    // so a solo emission would be discarded -- interp skips it; the elab
-    // differential rides the raw oracle leg alone
+    // so a solo emission would be discarded -- interp skips it
     const mode: WorkerMode = collect !== undefined && !fuzzy ? "interp" : "full";
     const [w, oracle] = await Promise.all([
       phase("worker:full", () => pool.run(src, "./" + base, mode, files)),
-      phase("worker:oracle", () => pool.run(raw, "./" + base + "r", "interp", files, true)),
+      phase("worker:oracle", () => pool.run(raw, "./" + base + "r", "interp", files)),
     ]);
     if (oracle.verdict === "reject" || oracle.verdict === "crash") {
       const f = save_finding(seed, "raw-" + oracle.verdict, ["stage=" + (oracle.stage ?? "check"), oracle.err ?? ""], raw);
@@ -4261,9 +4122,6 @@ export async function test_one(seed: bigint, collect?: { seed: bigint; want: str
     }
     iout = (w.out ?? "").trim();
     want = (oracle.out ?? "").trim();
-    if (oracle.elab === "abstain") {
-      elab_abstains++;
-    }
     if (iout !== want) {
       const f = save_finding(seed, "seal-diverge", ["raw interp:    " + want, "sealed interp: " + iout], src);
       save_aux(files);
@@ -4394,8 +4252,8 @@ export async function fuzz_run(): Promise<void> {
   TMP = fs.mkdtempSync(path.join(os.tmpdir(), "bend-fuzz-"));
   pool = new Pool(Number(cli_opt("--pool", String(Math.min(JOBS * (BATCH > 1 ? 2 : 1), BATCH > 1 ? 10 : 6)))));
   const smoke = WITH_IO
-    ? [610n, 30n]
-    : [569n, 1678n, 25n, 2n, 5n, 16n];
+    ? [9n, 3n]
+    : [1963n, 1782n, 44n, 115n, 4n, 8n];
   const fixed = SMOKE ? smoke : null;
   const count = fixed?.length ?? COUNT;
   console.log("bend3 fuzz: count=" + String(count) + (LOOP ? " (loop)" : "") + " seed=" + String(BASE_SEED) + " jobs=" + String(JOBS) + " threads=" + String(THREADS) + (SMOKE ? " +smoke" : "") + (CHECK_ONLY ? " +check-only" : "") + (WITH_IO ? " +io" : "") + (WITH_METAL ? " +metal" : "") + (NO_META || WITH_IO || CHECK_ONLY ? " -metamorphic" : ""));
@@ -4458,11 +4316,8 @@ export async function fuzz_run(): Promise<void> {
   if (Object.keys(skip_why).length > 0) {
     console.log("skips: " + Object.entries(skip_why).map(([k, v]) => k + "=" + String(v)).join(" "));
   }
-  if (elab_abstains > 0) {
-    console.log("elab-oracle abstained (fuel cap) on " + String(elab_abstains) + " seed(s)");
-  }
   const smoke_need = WITH_IO
-    ? ["ffi-goal", "forkio-goal", "print-goal", "doio-goal", "opq-goal"]
+    ? ["forkio-goal", "print-goal", "doio-goal", "baseio-goal"]
     : ["comp-goal", "if-goal", "open-goal", "tuple", "unit", "u32dep-goal", "assert-goal", "fdiv", "trans",
       "typed-reuse", "mint", "seal-add", "seal-xor", "seal-dist", "seal-mask", "seal-cmp", "seal-rot", "ford-goal",
       "module", "lib-goal"];

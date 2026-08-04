@@ -1,68 +1,76 @@
 # bend2-fuzzer
 
-Differential fuzzer for the [Bend2](https://github.com/HigherOrderCO/Bend2) backends.
-It generates random well-typed, terminating Bend programs and checks that the JS and C
-backends (plus the interpreter, as a third oracle on linear programs) produce the same
-result. A value disagreement or a crash in one backend is a finding; timeouts and
-programs that fail `--check` are ignored.
+Differential fuzzer for the [Bend3](https://github.com/HigherOrderCO) runtimes
+(the repo name predates Bend3; the fuzzer targets the `bend3` checkout). Each
+seed deterministically generates a well-typed, terminating Bend program with a
+U32 `main` in two algebraically-equal spellings (raw and identity-sealed) and
+runs them across every leg: the TS interpreter (the language spec, evaluated
+on the checked book — the CLI's own path), the compiled C backend
+(`-DPAR_BACKEND=0`), optionally Metal (`--metal`), and a min-parens
+metamorphic re-emission (the parser oracle). Any disagreement, rejection of
+generated source, or internal crash is a finding; resource blowups (timeouts,
+stack overflows) are persisted but not failures.
 
 ## Usage
 
-Run it **from the root of a Bend2 checkout** (the compiler under test). This repo is
-expected to sit one directory up from that checkout:
+Run it with **bun** either from the root of a bend3 checkout, or from anywhere
+if this repo sits next to a checkout named `bend3`:
 
 ```
 Software/
-├── Bend2/          # the checkout under test (has bend/src/CLI.ts, base/)
+├── bend3/          # the checkout under test (bend-ts/bend.ts, bend-base/)
 └── bend2-fuzzer/   # this repo
 ```
 
 ```sh
-cd /path/to/Software/Bend2
-bun run ../bend2-fuzzer/fuzz.ts [count] [--seed N] [--jobs N] [options]
+cd /path/to/Software/bend3
+bun ../bend2-fuzzer/fuzz.ts [count] [--seed N] [--jobs N] [options]
 ```
 
-The fuzzer resolves the compiler via `process.cwd()/bend/src/CLI.ts`, so the current
-directory must be the Bend2 repo root (it errors clearly otherwise). Common flags:
+Common flags:
 
 | flag | meaning |
 | --- | --- |
-| `[count]` | number of programs to generate (default varies) |
-| `--seed N` | base seed (reproducible) |
-| `--jobs N` | parallel workers |
-| `--no-sanitize` | build the C without ASan+UBSan (instrumentation is **on by default**, ~1.35x) |
-| `--no-js` | drop the JS backend; the interpreter becomes the primary oracle (interp-vs-C) |
-| `--linear-interp` | restrict the interpreter to linear programs (it runs on **all** programs by default) |
-| `--dump` / `--dump-min` | print a single generated program (max / min parens) |
-| `--show-rejected` | surface `--check` rejects |
-| `--with-metal` | also run `@kernel`-shape programs through `--as-metal` (macOS) |
-| `--no-server` / `--no-cbatch` | disable the persistent-server / C-batch fast paths |
-| `--profile` | per-phase timing breakdown |
+| `[count]` | number of programs to generate (default 100) |
+| `--seed N` | base seed (reproducible; findings print their exact repro line) |
+| `--jobs N` | parallel batches (default: cores − 2, max 8) |
+| `--batch N` | seeds merged per compiled binary (default 16; `1` disables) |
+| `--threads N` | `-DNUM_THREADS` for the C leg (default 1) |
+| `--opt N` | `-O` level for clang (default 3) |
+| `--metal` | also build and run each binary's Metal leg (macOS, GPU-serialized) |
+| `--io` | the IO smoke mode: effectful programs checked by exact process output |
+| `--smoke` | fixed seed set that must cover a feature checklist and pass |
+| `--check-only` | stop after the checker legs (no clang) |
+| `--no-meta` | drop the min-parens metamorphic leg |
+| `--dump` / `--dump-min` / `--dump-raw` | print one generated program and exit |
+| `--keep` | keep temp build dirs |
 | `--loop` | run continuously |
+| `--profile` | per-phase timing breakdown |
 
 ## Oracles
 
-The **interpreter** is the language spec and the primary oracle; the compiled **C**
-backend is under test; the legacy **JS** backend is an optional extra. Any value
-disagreement among the available oracles is a finding — which side is wrong is
-triaged later from a minimal repro. The interpreter prints sugared values (lists as
-`[a, b]`, strings, `'c'`, sized ints with a type suffix) while the compiled backends
-print the raw form (`cons{a, nil}`, code points, bare ints), so outputs are
-structurally canonicalized before comparison. `--no-js` makes the fuzzer run on the
-interpreter and C alone, so removing the JS backend from Bend is a one-flag change.
-Beyond value diffing, the C-under-test binary is built with ASan+UBSan by default
-(needs no oracle — a sanitizer report is a finding on its own; `--no-sanitize` opts
-out), and the metamorphic re-parenthesization leg catches front-end bugs the
-cross-backend diff cannot.
+The interpreter runs the **checked** book (`parse_book` → `book_check`, which
+elaborates in place → `term_snf`), exactly what `bun bend-ts/bend.ts file.bend
+--eval` does. The raw sibling's value is the reference; the sealed sibling
+must equal it on the interpreter and on every compiled leg, so a broken seal
+cannot bless itself. The metamorphic leg re-emits the same seed with minimal
+parentheses (same RNG draws, only string assembly differs) and re-runs it on
+the interpreter — the only leg that can see front-end bugs, since all backends
+share one front end. In `--io` mode the interpreter performs no effects, so
+programs are checked by their exact stdout/exit code instead, plus an orphan
+sweep for processes that outlive the binary.
 
 ## Output
 
-Findings, rejects, and skips are written under `findings/` (gitignored) next to
-`fuzz.ts`. Each finding is a standalone `.bend` with a header describing the
-divergence; reproduce with `bun bend/src/CLI.ts <file>` and `--as-c` from the Bend2
-root.
+Findings land in `findings/` (gitignored) next to `fuzz.ts` as standalone
+`.bend` files with a verdict header and exact repro line; resource skips go to
+`findings/skipped/`. The generator is version-controlled but findings are not:
+a generator edit remaps every seed, so the saved program is the durable
+artifact.
 
 ## Notes
 
-`NOTES.md` holds the design rationale, invariants, performance numbers, and validation
-recipes — read it before changing the generator.
+`NOTES.md` holds the maintainer notes: invariants, the batching design,
+validation recipes, and what the fuzzer cannot see. Read it before changing
+the generator. The long doc comment at the top of `fuzz.ts` is the design
+spec proper.
