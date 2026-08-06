@@ -48,6 +48,49 @@ through `200bc799`). That rebase changed, in step with the language:
   ill-typed (the split specializes the hypothesis in context by itself) and
   were replaced by direct use.
 
+The **2026-08-06 migration** (onto the src-split / dotted-names compiler,
+bend3 through the do-bind-elem + f32-fold fixes) changed more, since the
+whole surface syntax moved and much of the above is now itself stale:
+
+- **Compiler location + API**: the checkout is `bend-ts/src/{bend,comp}.ts`
+  (was `bend-ts/bend.ts`). The worker imports both, uses `parse_file`
+  (FS-only — each request's sources are WRITTEN into a per-pid scratch
+  `ROOT/.fz-w<pid>/`, a direct child of ROOT so a `../bend-base` import
+  resolves), `book_check` (no BendError class — a checker fail is a plain
+  `{$:"Err"}`), and `comp.book_compile` with a C-effect reader that serves
+  `./bend-base/IO/effs/*.c` from ROOT. Main owns the scratch lifecycle and
+  wipes the whole `.fz-w*` glob at startup and on every exit signal (a
+  SIGKILLed worker cannot clean its own dir).
+- **Application syntax → PARENS**: `T<A,B>` type application and
+  `f<A,B>(x)` generic calls became `T(A, B)` and `f(A, B, x)` (call-site
+  type args lead the value args). DECLARATION heads keep their `<A>`
+  binders (`type D<A>:`, `def f<A>(..)`). `::` qualification is gone —
+  dotted names, and NO module namespaces (entry names are global across
+  files), so `mod_qualify` is the identity and the module split is a pure
+  file cut. `IO<A>`/`Chan<A>` → `IO(A)`/`Chan(A)`. The io templates are
+  normalized wholesale by `io_parenify` (a balanced-angle rewrite, safe
+  against the object language's spaced `<`/`>` comparisons and `def`/`type`
+  decl heads).
+- **Builtins are DOTTED, not `$`**: `F32.to_u32`, `U32.to_f32`,
+  `F32.sqrt/sin/cos/tanh/exp/log/floor` (the `$`-spelled forms are gone).
+- **op2 no longer ASSOCIATES**: an op2 operand is ALWAYS parenthesized —
+  `e_in` parens unconditionally, `PREC` survives only as the op-identity
+  table, and MIN_PARENS now varies ONLY the statement-head position (def
+  body / let value / return). Equation SIDES are operand position, so they
+  parenthesize in both modes (a bare op2 side is a min-parens-only reject —
+  the one metamorphic finding of the migration).
+- **Ctors, equations, arrays, values**: ctor patterns and literals are
+  `Type.Ctor{..}` qualified; `{a = b : T}` → `{a == b : T}` and `{=}` →
+  `{==}`; `assert` uses `forall` (not `for all`); array literals are
+  `![k: v, _: d; n]` (the `!` prefix); `U{}` → `Unit.U{}`; inline
+  annotations are `(v : T)` and let annotations `x : T = v` (the `{v : T}`
+  brace form is dead); parallel-let is `a & b = x & y`; char literals are
+  U32 codepoints (backtick chars gone); dependent arrows `@z:U32 -> F(z)`.
+- **do-notation is monad-generic** at HEAD (`do M(..)`), so a user
+  Result-over-IO transformer works; the do-bind element resolver
+  re-instances alias-spelled types (bend3's elab_bnd), and `return` reaches
+  match/if arms inside do-bodies.
+
 ## Invariants (violate = silent coverage loss or reject noise)
 
 These are stated precisely in the `fuzz.ts` header; the short list, because
@@ -66,28 +109,32 @@ every one of them has been broken at least once:
 - Names are `<letters><uid>` and globally unique — batching (disjoint uid
   ranges) and `mod_qualify` (word-boundary replacement) both lean on this.
 
-## Known noise and open compiler bugs (2026-08-04)
+## Known noise and open compiler bugs (2026-08-06)
 
 Remove entries here when the bends are fixed — every live finding class
 drowns real signal:
 
-- `c-diverge` (~5% of seeds): bend3 issue
-  `.devs/issues/comp_generic_f32_field_lost.md` — a multi-ctor generic
-  datatype whose ctor has a tvar field instantiated at F32 in a non-final
-  position loses that field's payload in the compiled leg. Found by this
-  fuzzer during the rebase; fires often because the generator loves exactly
-  that shape.
-- `metal-leg` LAUNCH failures: `.devs/issues/gpu_drop_join_body_pruned.md`
-  — the device dispatcher keeps `F_DROP_JOIN_*` rows whose bodies the
-  GPU-reachability pruning dropped, and the gpu source is compiled at
-  launch, so the binary dies at startup.
-- `compiler-crash` stage=comp RangeError on big dec patterns:
-  `.devs/issues/comp_dec_switch_bracket_wall.md` — the clang bracket
-  wall half of this issue is FIXED (flat leaf_inline emission +
-  function-wide local-name registry, 2026-08-04), but book_compile
-  still recurses per `K+x` peel and stack-overflows between K=2000 and
-  K=3000. The generator keeps drawing K up to 4000 on purpose (valid
-  code; the findings disappear when the chain compiles iteratively).
+- ~~`c-diverge` f32-generic-field~~: FIXED. The original
+  `comp_generic_f32_field_lost` (a tvar field instantiated at F32 in a
+  non-final slot lost its payload compiled) was fixed for the DIRECT
+  match-opens (comp's `ctr_fty` at pend_open_take + the spun head-arm),
+  but this fuzzer's first post-migration run caught the INCOMPLETE half:
+  a tvar-F32 field read in the SAME arm that recurses flows through the
+  fold's synthesized continuation (`term_leaf_clo` → `term_tree_chain`),
+  which bound arm fields at the ctor ROW Ty. `List(F32)` is the everyday
+  trigger, so the class fired at ~4%. Fixed by re-instancing at
+  `term_tree_chain` too (prep's `ctr_fty`, now the shared law); pinned by
+  bend3 `compile_generic_f32_fold.bend`. 300 seeds clean.
+- `compiler-crash` stage=comp on big dec patterns
+  (`case 3000+x:`): STILL OPEN — verified at HEAD, `--compile`
+  stack-overflows ("Maximum call stack size exceeded") on a `K+x` peel
+  chain around K=2000-3000. The bracket-wall half was fixed; the
+  book_compile per-peel recursion was not. NOTE: the issue FILE
+  `comp_dec_switch_bracket_wall.md` was DELETED in a bend3 cleanup with
+  only the bracket half recorded as fixed, so this live bug currently has
+  no tracking issue — worth refiling. The generator still draws K up to
+  4000 on purpose (valid code; findings vanish when the chain compiles
+  iteratively).
 - `trans-ulp` skips: F32 transcendentals are each backend libm's float
   routines by ruling; a `trans`-flagged program keeps every leg except the
   value comparison (counted skip, kept out of merged folds).
@@ -103,6 +150,42 @@ drowns real signal:
   ruling; the orphan sweep only sees processes).
 - ASan/UBSan, CUDA, `--no-halt`, contraction at abstract types, recursion
   on Ford evidence (refused by ruling).
+
+## Coverage gaps flagged during the 2026-08-06 migration (not yet added)
+
+Candidate generator work, in rough value order — each is a shape the
+current generator does NOT emit but the language now exercises:
+
+- **`fname`-macro collisions** (`comp_fname_system_macro`, OPEN): a def
+  named `lock`/`ok`/`test` compiles to `F_<UPPER>` and collides with a
+  `<unistd.h>`/`<fcntl.h>` macro, dying in clang after the checker said
+  yes. The fuzzer STRUCTURALLY cannot hit it — every generated name
+  carries a uid suffix (`lock38` → `F_LOCK38`, no collision). It DOES
+  reach clang, so a rare bare-word name mode drawing from the F_* danger
+  lexicon (solo runs, no batch) would catch this class.
+- **`io_prebind` shape** (fixed `e0b32fcf`, found by BendQuest not the
+  fuzzer): a pure projection let BEFORE an effect bind, whose argument
+  uses split across the bind. `--io` never emits it; it should.
+- **Bool-condition `if`**: at HEAD `if` takes both U32 and Bool
+  conditions. If the generator only emits U32 guards, the Bool-condition
+  checker path (`term_check` Swi arm) is untested outside the truth-if
+  helper.
+- **Metamorphic axis replacement**: min-parens is nearly the identity now
+  (op2 always parens), so the parser-differential leg lost most of its
+  reach. The do-bind-elem fix makes ALIAS-RESPELLING a lawful metamorphic
+  transform (respell a type through definitional alias levels — same
+  book, different spelling); that is the natural replacement axis.
+
+## Worker scratch (2026-08-06)
+
+Each worker writes its request's sources into `ROOT/.fz-w<pid>/` — a
+DIRECT child of the checkout root, so a generated `import ../bend-base/X`
+resolves to `ROOT/bend-base` (one level ONLY; an umbrella subdir breaks
+that relative path and every program raw-rejects on the missing import).
+Main owns the lifecycle: it wipes the whole `.fz-w*` glob at startup and
+on exit/SIGINT/SIGTERM/SIGHUP, because a SIGKILLed or timed-out worker
+cannot clean its own dir and a stray `.fz-w*` fails bend3's repo gate
+(untracked-entry check).
 
 ## Validation recipe after touching the generator
 

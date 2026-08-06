@@ -18,7 +18,7 @@ if this repo sits next to a checkout named `bend3`:
 
 ```
 Software/
-├── bend3/          # the checkout under test (bend-ts/bend.ts, bend-base/)
+├── bend3/          # the checkout under test (bend-ts/src/bend.ts, bend-base/)
 └── bend2-fuzzer/   # this repo
 ```
 
@@ -50,7 +50,7 @@ Common flags:
 ## Oracles
 
 The interpreter runs the **checked** book (`parse_book` → `book_check`, which
-elaborates in place → `term_snf`), exactly what `bun bend-ts/bend.ts file.bend
+elaborates in place → `term_snf`), exactly what `bun bend-ts/src/bend.ts file.bend
 --eval` does. The raw sibling's value is the reference; the sealed sibling
 must equal it on the interpreter and on every compiled leg, so a broken seal
 cannot bless itself. The metamorphic leg re-emits the same seed with minimal

@@ -157,7 +157,7 @@
 // switches and filled asserts, dead defs/lets.
 //
 // Custom C-bodied effects are NOT generated: the ratified Op ruling
-// admits only the hand-written IO::Op rows (a C-bodied def compiles only
+// admits only the hand-written IO.Op rows (a C-bodied def compiles only
 // when its camelized name matches an install ctor), so the old per-seed
 // effect ABI shapes and the in-process C leak probe are gone.
 //
@@ -165,12 +165,12 @@
 // their deterministic process output; the interpreter performs no
 // effects, so these cannot use the differential oracle. It also generates
 // CANCELLATION shapes -- timeout, race, spawn-and-drop, an explicit
-// IO::cancel on a live handle, a cancelled channel sender/receiver, and a
+// IO.cancel on a live handle, a cancelled channel sender/receiver, and a
 // timed-out exec -- plus a WORKING channel (fz_pipe: a spawned producer
 // over a cap-1 buffer, so whichever side runs first the other is parked
 // and woken -- both rendezvous directions -- then a recv and a send after
 // the close, for the end-of-stream Fail and the send-to-closed drop),
-// IO::die (the one Op that reclaims NOTHING on its way out: no cancel
+// IO.die (the one Op that reclaims NOTHING on its way out: no cancel
 // walk, so whatever the seed left running rides entirely on io_run's exit
 // teardown, and the exit CODE is the assertion -- leg_c and leg_metal take
 // the expected code), and effects bound and DROPPED (now/now_ms/rand_word/
@@ -305,14 +305,21 @@ import { pathToFileURL } from "node:url";
 // root, else the `bend3` sibling of this repo (the layout after the move
 // out of .devs/scripts)
 const ROOT0 = [process.cwd(), path.join(import.meta.dirname, "..", "bend3")]
-  .find((d) => fs.existsSync(path.join(d, "bend-ts", "bend.ts")));
+  .find((d) => fs.existsSync(path.join(d, "bend-ts", "src", "bend.ts")));
 if (ROOT0 === undefined) {
   console.error("cannot find the bend3 checkout: run from its repo root, or keep it as a sibling `bend3/` of this repo");
   process.exit(1);
 }
 const ROOT: string = ROOT0;
-const BEND_TS = path.join(ROOT, "bend-ts", "bend.ts");
+const BEND_TS = path.join(ROOT, "bend-ts", "src", "bend.ts");
+const COMP_TS = path.join(ROOT, "bend-ts", "src", "comp.ts");
 const FINDINGS = path.join(import.meta.dirname, "findings");
+// worker import-scratch: ROOT/.fz-w<pid>, a DIRECT child of the checkout
+// root so a generated `../bend-base/X` import resolves to ROOT/bend-base
+// (one level only -- an extra nesting level breaks that relative path).
+// main owns the lifecycle and clears the whole ".fz-w*" glob, since a
+// SIGKILLed worker cannot clean its own dir
+const WORK_PREFIX = ".fz-w";
 const WORKER_TIMEOUT = 20_000;
 const CC_TIMEOUT = 90_000;
 const RUN_TIMEOUT = 15_000;
@@ -459,11 +466,12 @@ class Gen {
 // E
 // -
 // An E is a rendered expression plus the precedence of its top operator (99 =
-// atom). MIN_PARENS is consulted ONLY here: full mode parenthesizes every
-// binary node, minimal mode only where the parser's precedence table (PREC
-// mirrors OPRS/PREC in bend-ts/bend.ts; every binary op is left-assoc)
-// requires it. Both spellings denote the same tree — the metamorphic leg
-// relies on exactly this.
+// atom). The 2026-08-05 parser dropped op2 association entirely: an op2
+// operand that is itself an op2 ALWAYS needs parens, so e_in parenthesizes
+// unconditionally and PREC survives only as the op-identity table. MIN_PARENS
+// is consulted ONLY at top positions (e_at and the plain-let value), the one
+// paren freedom the grammar still grants; the metamorphic leg now varies
+// exactly that.
 
 let MIN_PARENS = false;
 
@@ -486,12 +494,8 @@ export function e_at(e: E): string {
   return MIN_PARENS || e.p === 99 ? e.s : "(" + e.s + ")";
 }
 
-export function e_in(e: E, need: number, right: boolean): string {
-  if (e.p === 99) {
-    return e.s;
-  }
-  const bare = MIN_PARENS && (e.p > need || (e.p === need && !right));
-  return bare ? e.s : "(" + e.s + ")";
+export function e_in(e: E, _need: number, _right: boolean): string {
+  return e.p === 99 ? e.s : "(" + e.s + ")";
 }
 
 export function e_bin(l: E, op: string, r: E): E {
@@ -509,10 +513,10 @@ export function e_fn2(op: string, x: E, y: E): E {
 
 export function e_ann_bind(name: string, val: E, type: string): string {
   if (val.op !== "!=") {
-    return name + " = {" + val.s + " : " + type + "}";
+    return name + " : " + type + " = " + val.s;
   }
   const raw = "an" + String(uid_next());
-  return raw + " = " + e_at(val) + "\n  " + name + " = {" + raw + " : " + type + "}";
+  return raw + " = " + e_at(val) + "\n  " + name + " : " + type + " = " + raw;
 }
 
 // Types (the generator's mirror of the object language)
@@ -647,11 +651,11 @@ export function ty_str(t: T): string {
       if (t.a.dep === true) {
         return t.a.name + "(" + ty_str(t.args[0]) + ", z => " + ty_str(t.args[1]) + ")";
       }
-      return t.args.length === 0 ? t.a.name : t.a.name + "<" + t.args.map(ty_str).join(",") + ">";
+      return t.args.length === 0 ? t.a.name : t.a.name + "(" + t.args.map(ty_str).join(", ") + ")";
     }
     case "fun": return "(" + ty_str(t.dom) + (t.q === "none" ? " --> " : " -> ") + ty_str(t.cod) + ")";
-    case "io": return "IO<" + ty_str(t.t) + ">";
-    case "eql": return "{" + t.side + " = " + t.side + " : " + ty_str(t.t) + "}";
+    case "io": return "IO(" + ty_str(t.t) + ")";
+    case "eql": return "{" + t.side + " == " + t.side + " : " + ty_str(t.t) + "}";
   }
 }
 
@@ -816,7 +820,7 @@ export function adt_value(a: Adt, c: Ctor, fields: string[]): string {
   if (a.sugar === "unit") {
     return "()";
   }
-  return c.name + "{" + fields.join(", ") + "}";
+  return a.name + "." + c.name + "{" + fields.join(", ") + "}";
 }
 
 export function adt_pattern(a: Adt, c: Ctor, fields: string[]): string {
@@ -979,7 +983,7 @@ export function num_gen_u32(env: V[], fuel: number): E {
   return G.wpick<() => E>([
     [15, () => num_lit_u32()],
     [vars.length > 0 ? 22 : 0, () => e_atom(G.pick(vars).name)],
-    [1, () => e_atom("`" + str_char() + "`")],
+    [1, () => e_atom(String(str_char().charCodeAt(0)))],
     [34, () => {
       const op = G.wpick(OPS);
       const l = num_gen_u32(env, fuel - 1);
@@ -989,7 +993,7 @@ export function num_gen_u32(env: V[], fuel: number): E {
     [6, () => e_bin(num_gen_u32(env, fuel - 1), G.pick(["/", "%"]), G.chance(0.25) ? e_atom("0") : num_gen_u32(env, fuel - 1))],
     [6, () => {
       feature_add("f32");
-      return e_fn1("$f32_to_u32", num_gen_f32(env, fuel - 1));
+      return e_fn1("F32.to_u32", num_gen_f32(env, fuel - 1));
     }],
     [4, () => {
       feature_add("f32cmp");
@@ -1005,7 +1009,7 @@ export function num_gen_u32(env: V[], fuel: number): E {
         return num_gen_u32(env, 1);
       }
       if (t.k === "f32") {
-        return e_fn1("$f32_to_u32", num_gen_f32(env, 1));
+        return e_fn1("F32.to_u32", num_gen_f32(env, 1));
       }
       feature_add("fold");
       return e_atom(rd_ensure(t) + "(" + e_at(syn(t, env, 1)) + ")");
@@ -1031,7 +1035,7 @@ export function num_gen_f32(env: V[], fuel: number): E {
     [26, () => num_lit_f32(false)],
     [vars.length > 0 ? 12 : 0, () => e_atom(G.pick(vars).name)],
     [4, () => num_lit_f32(true)],
-    [15, () => e_fn1("$u32_to_f32", num_gen_u32(env, 0))],
+    [15, () => e_fn1("U32.to_f32", num_gen_u32(env, 0))],
     [40, () => e_bin(num_gen_f32(env, fuel - 1), G.pick(["+", "-", "*"]), num_gen_f32(env, fuel - 1))],
     [8, () => {
       feature_add("fdiv");
@@ -1039,20 +1043,20 @@ export function num_gen_f32(env: V[], fuel: number): E {
     }],
     [8, () => {
       const e = num_gen_f32(env, fuel - 1);
-      return e_fn1("$sqrt", e_bin(e, "*", e));
+      return e_fn1("F32.sqrt", e_bin(e, "*", e));
     }],
-    [4, () => e_fn1("$floor", num_gen_f32(env, fuel - 1))],
+    [4, () => e_fn1("F32.floor", num_gen_f32(env, fuel - 1))],
     [5, () => {
       feature_add("trans");
-      return e_fn1(G.pick(["$sin", "$cos", "$tanh"]), num_gen_f32(env, fuel - 1));
+      return e_fn1(G.pick(["F32.sin", "F32.cos", "F32.tanh"]), num_gen_f32(env, fuel - 1));
     }],
     [2, () => {
       feature_add("trans");
-      return e_fn1("$exp", num_lit_f32(false));
+      return e_fn1("F32.exp", num_lit_f32(false));
     }],
     [2, () => {
       feature_add("trans");
-      return e_fn1("$log", num_lit_f32(false));
+      return e_fn1("F32.log", num_lit_f32(false));
     }],
     [3, () => {
       feature_add("trans");
@@ -1260,7 +1264,7 @@ export function syn(goal: T, env: V[], fuel: number): E {
     }
     case "eql": {
       feature_add("eql");
-      return e_atom("{=}");
+      return e_atom("{==}");
     }
     case "io": {
       throw new Error("io goals never reach syn (io_val owns them)");
@@ -1294,8 +1298,7 @@ export function syn_call_unify(goal: T, env: V[], fuel: number): E | null {
   feature_add(d.tps.length > 0 ? "generic" : "unicall");
   const args = d.ps.map((p, i) => syn_def_arg(d, i, ty_sub(p, m), env, Math.max(0, fuel - 1)));
   const targs = d.tps.map((tp) => ty_str(m.get(tp) as T));
-  const head = d.tps.length > 0 ? d.name + "<" + targs.join(",") + ">" : d.name;
-  return e_defcall(d.name, head + "(" + args.join(", ") + ")");
+  return e_defcall(d.name, d.name + "(" + targs.concat(args).join(", ") + ")");
 }
 
 export function syn_mint_def(goal: T, env: V[]): E | null {
@@ -1428,8 +1431,8 @@ export function syn_assert(goal: T, env: V[], fuel: number): E {
   // in the same file as its assertion, and the module split cuts
   // between entries
   const bodiless = G.chance(0.3);
-  DEFS.push("assert " + proof + ":\n  for all -A : Type\n  for all x : A\n  {x = x : A}"
-    + (bodiless ? "" : "\n\ndef " + proof + "(A, x):\n  {=}"));
+  DEFS.push("assert " + proof + ":\n  forall -A : Type\n  forall x : A\n  {x == x : A}"
+    + (bodiless ? "" : "\n\ndef " + proof + "(A, x):\n  {==}"));
   const body = ty_eq(witness, goal)
     ? e_atom("x")
     : syn(goal, [v_many("x", witness)], Math.max(0, fuel - 1));
@@ -1460,10 +1463,10 @@ export function syn_clofield(goal: T, env: V[], fuel: number): E {
   const body = goal.k === "u32"
     ? "f(k)"
     : "fk = f(k)\n      " + e_at(syn(goal, [v_many("fk", U32C)], Math.max(0, fuel - 1)));
-  DEFS.push("def " + use + "(c: " + Cf + ") -> " + ty_str(goal) + ":\n  match c:\n    case " + Cf + "a{f, k}:\n      " + body);
+  DEFS.push("def " + use + "(c: " + Cf + ") -> " + ty_str(goal) + ":\n  match c:\n    case " + Cf + "." + Cf + "a{f, k}:\n      " + body);
   const y = "y" + String(uid_next());
   const lam = y + " => " + e_at(num_gen_u32(env.concat([v_many(y, U32C)]), 1));
-  return e_defcall(use, use + "(" + Cf + "a{" + lam + ", " + e_at(num_gen_u32(env, 1)) + "})");
+  return e_defcall(use, use + "(" + Cf + "." + Cf + "a{" + lam + ", " + e_at(num_gen_u32(env, 1)) + "})");
 }
 
 // syn_lib : the SHIPPED library as a caller sees it -- List/String
@@ -1481,25 +1484,25 @@ export function syn_lib(goal: T, env: V[], fuel: number): E {
   feature_add("lib-" + shape);
   let call: string;
   if (shape === "sum") {
-    call = "List::sum(" + xs + ")";
+    call = "List.sum(" + xs + ")";
   } else if (shape === "len") {
-    call = "List::length<U32>(" + xs + ")";
+    call = "List.length(U32, " + xs + ")";
   } else if (shape === "rev") {
-    call = "List::sum(List::reverse<U32>(" + xs + "))";
+    call = "List.sum(List.reverse(U32, " + xs + "))";
   } else if (shape === "cat") {
-    call = "List::sum(List::concat<U32>(" + xs + ", " + xs + "))";
+    call = "List.sum(List.concat(U32, " + xs + ", " + xs + "))";
   } else if (shape === "map") {
-    call = "List::sum(List::map<U32, U32>(y" + id + " => " + e_at(num_gen_u32([v_many("y" + id, U32C)], 1)) + ", " + xs + "))";
+    call = "List.sum(List.map(U32, U32, y" + id + " => " + e_at(num_gen_u32([v_many("y" + id, U32C)], 1)) + ", " + xs + "))";
   } else if (shape === "fold") {
-    call = "List::fold<U32, U32>(a" + id + " => b" + id + " => (a" + id + " + b" + id + "), " + String(G.int(64)) + ", " + xs + ")";
+    call = "List.fold(U32, U32, a" + id + " => b" + id + " => (a" + id + " + b" + id + "), " + String(G.int(64)) + ", " + xs + ")";
   } else if (shape === "take") {
-    call = "List::sum(List::take<U32>(" + String(1 + G.int(3)) + ", " + xs + "))";
+    call = "List.sum(List.take(U32, " + String(1 + G.int(3)) + ", " + xs + "))";
   } else if (shape === "cnt") {
-    call = "List::count(" + e_at(num_gen_u32(env, 0)) + ", " + xs + ")";
+    call = "List.count(" + e_at(num_gen_u32(env, 0)) + ", " + xs + ")";
   } else {
     IMPORTS.add("String");
     IMPORTS.add("Char");
-    call = "String::length(String::concat(" + str_lit(1 + G.int(5)) + ", String::reverse(" + str_lit(1 + G.int(5)) + ")))";
+    call = "String.length(String.concat(" + str_lit(1 + G.int(5)) + ", String.reverse(" + str_lit(1 + G.int(5)) + ")))";
   }
   if (goal.k === "u32") {
     return e_atom(call);
@@ -1532,28 +1535,28 @@ export function syn_ford(goal: T, env: V[], fuel: number): E {
   IMPORTS.add("Pair");
   const id = String(uid_next());
   const N = "Fn" + id;
-  const Z = N + "z";
-  const S = N + "s";
-  DECLS.push("type " + N + ":\n  " + Z + "{}\n  " + S + "{p: " + N + "}");
+  const Z = N + "." + N + "z";
+  const S = N + "." + N + "s";
+  DECLS.push("type " + N + ":\n  " + N + "z{}\n  " + N + "s{p: " + N + "}");
   const erased = G.chance(0.35);
   const midx = G.chance(0.3);
   const P = syn_plain_ty(1);
   const V = "Fv" + id;
-  const VZ = V + "z";
-  const VS = V + "s";
+  const VZ = V + "." + V + "z";
+  const VS = V + "." + V + "s";
   const em = erased ? "-" : "";
   const ixd = midx ? "(n: " + N + ", m: U32)" : "(n: " + N + ")";
   const fat = (i: string): string => midx ? V + "(" + i + ", m)" : V + "(" + i + ")";
-  DECLS.push("type " + V + ixd + ":\n  " + VZ + "{" + em + "eq: {n = " + Z + "{} : " + N + "}, w: " + ty_str(P) + "}\n  "
-    + VS + "{p: " + N + ", x: " + ty_str(P) + ", t: " + fat("p") + ", " + em + "eq: {n = " + S + "{p} : " + N + "}}");
+  DECLS.push("type " + V + ixd + ":\n  " + V + "z{" + em + "eq: {n == " + Z + "{} : " + N + "}, w: " + ty_str(P) + "}\n  "
+    + V + "s{p: " + N + ", x: " + ty_str(P) + ", t: " + fat("p") + ", " + em + "eq: {n == " + S + "{p} : " + N + "}}");
   const toN = "fw" + id;
   DEFS.push("def " + toN + "(k: U32) -> " + N + ":\n  match k:\n    case 0:\n      " + Z + "{}\n    case 1+p:\n      " + S + "{" + toN + "(p)}");
   const benv = midx ? [v_many("m", U32C)] : [];
   const bps = midx ? "(n: " + N + ", m: U32)" : "(n: " + N + ")";
   const bargs = midx ? "p, m" : "p";
   DEFS.push("def " + V + "b" + bps + " -> " + fat("n") + ":\n  match n:\n    case " + Z + "{}:\n      "
-    + VZ + "{{=}, " + e_at(syn(P, benv, 1)) + "}\n    case " + S + "{p}:\n      "
-    + VS + "{p, " + e_at(syn(P, benv, 1)) + ", " + V + "b(" + bargs + "), {=}}");
+    + VZ + "{{==}, " + e_at(syn(P, benv, 1)) + "}\n    case " + S + "{p}:\n      "
+    + VS + "{p, " + e_at(syn(P, benv, 1)) + ", " + V + "b(" + bargs + "), {==}}");
   const pc = (b: string): string => P.k === "u32" ? b : e_at(syn(U32C, [v_many(b, P)], 1));
   const eps = midx ? "(n: " + N + ", m: U32, v: " + fat("n") + ")" : "(n: " + N + ", v: " + fat("n") + ")";
   const eargs = (i: string, vv: string): string => midx ? i + ", m, " + vv : i + ", " + vv;
@@ -1565,14 +1568,14 @@ export function syn_ford(goal: T, env: V[], fuel: number): E {
     const D = "fd" + id;
     DEFS.push("def " + D + "(x: " + N + ", zc: Type, sc: Type) -> Type:\n  match x:\n    case " + Z + "{}:\n      zc\n    case " + S + "{p}:\n      sc");
     const sz = "fr" + id;
-    DEFS.push("def " + sz + "(p: " + N + ", e: {" + S + "{p} = " + Z + "{} : " + N + "}) -> Empty:\n  %e : w => " + D + "(w, Unit, Empty)\n  U{}");
+    DEFS.push("def " + sz + "(p: " + N + ", e: {" + S + "{p} == " + Z + "{} : " + N + "}) -> Empty:\n  %e : w => " + D + "(w, Unit, Empty)\n  Unit.U{}");
     const pr = "fp" + id;
     DEFS.push("def " + pr + "(n: " + N + ") -> " + N + ":\n  match n:\n    case " + Z + "{}:\n      " + Z + "{}\n    case " + S + "{p}:\n      p");
     const inj = "fj" + id;
-    DEFS.push("def " + inj + "(a: " + N + ", b: " + N + ", e: {" + S + "{a} = " + S + "{b} : " + N + "}) -> {a = b : " + N + "}:\n  %e : w => {" + pr + "(w) = b : " + N + "}\n  {=}");
+    DEFS.push("def " + inj + "(a: " + N + ", b: " + N + ", e: {" + S + "{a} == " + S + "{b} : " + N + "}) -> {a == b : " + N + "}:\n  %e : w => {" + pr + "(w) == b : " + N + "}\n  {==}");
     const ops = midx ? "(p: " + N + ", m: U32, vv: " + fat(S + "{p}") + ")" : "(p: " + N + ", vv: " + fat(S + "{p}") + ")";
-    DEFS.push("def " + V + "o" + ops + " -> (U32 & " + fat("p") + "):\n  match vv:\n    case " + VZ + "{eq, w}:\n      Empty::absurd((U32 & " + fat("p") + "), " + sz + "(p, eq))\n    case " + VS + "{q, x, t, eq}:\n      ("
-      + pc("x") + ", ({(%" + inj + "(p, q, eq) (w => w)) : (" + fat("q") + " -> " + fat("p") + ")})(t))");
+    DEFS.push("def " + V + "o" + ops + " -> (U32 & " + fat("p") + "):\n  match vv:\n    case " + VZ + "{eq, w}:\n      Empty.absurd((U32 & " + fat("p") + "), " + sz + "(p, eq))\n    case " + VS + "{q, x, t, eq}:\n      ("
+      + pc("x") + ", ((%" + inj + "(p, q, eq); (w => w)) : (" + fat("q") + " -> " + fat("p") + "))(t))");
     // split : the checker's split specializes v's type to fat(S{p}) in
     // the arm's context by itself now, so the old as-equation identity
     // cast ({(%en (w => w)) : fat(n) -> fat(S{p})})(v) is not just
@@ -1589,7 +1592,7 @@ export function syn_ford(goal: T, env: V[], fuel: number): E {
     const ad = "fa" + id;
     DEFS.push("def " + ad + "(a: " + N + ", b: " + N + ") -> " + N + ":\n  match a:\n    case " + Z + "{}:\n      b\n    case " + S + "{p}:\n      " + S + "{" + ad + "(p, b)}");
     const ap = V + "p";
-    DEFS.push("def " + ap + "(a: " + N + ", b: " + N + ", x: " + V + "(a), y: " + V + "(b)) -> " + V + "(" + ad + "(a, b)):\n  match a as ea:\n    case " + Z + "{}:\n      y\n    case " + S + "{p}:\n      pp = " + V + "o(p, x)\n      match pp:\n        case (hv, tv):\n          " + VS + "{" + ad + "(p, b), hv, " + ap + "(p, b, tv, y), {=}}");
+    DEFS.push("def " + ap + "(a: " + N + ", b: " + N + ", x: " + V + "(a), y: " + V + "(b)) -> " + V + "(" + ad + "(a, b)):\n  match a as ea:\n    case " + Z + "{}:\n      y\n    case " + S + "{p}:\n      pp = " + V + "o(p, x)\n      match pp:\n        case (hv, tv):\n          " + VS + "{" + ad + "(p, b), hv, " + ap + "(p, b, tv, y), {==}}");
     const uu = "fv" + id;
     DEFS.push("def " + uu + "(k: U32, j: U32) -> U32:\n  na = " + toN + "(k % 4)\n  nb = " + toN + "(j % 4)\n  " + V + "e(" + ad + "(na, nb), " + ap + "(na, nb, " + V + "b(na), " + V + "b(nb)))");
     DEFR.push({ name: uu, tps: [], ps: [U32C, U32C], ret: U32C });
@@ -1611,7 +1614,7 @@ export function syn_ford(goal: T, env: V[], fuel: number): E {
     feature_add("sigelim");
     const sg = "Sf" + id;
     DECLS.push("type " + sg + "(A: Type, B: A -> Type):\n  " + sg + "a{a: A, b: B(a)}");
-    core = "s = {" + sg + "a{nn, " + V + "b(nn)} : " + sg + "(" + N + ", i => " + V + "(i))}\n  match s:\n    case " + sg + "a{a, b}:\n      " + V + "e(a, b)";
+    core = "s : " + sg + "(" + N + ", i => " + V + "(i)) = " + sg + "." + sg + "a{nn, " + V + "b(nn)}\n  match s:\n    case " + sg + "." + sg + "a{a, b}:\n      " + V + "e(a, b)";
   } else {
     core = ucall("nn");
   }
@@ -1662,7 +1665,7 @@ export function syn_dep(goal: T, env: V[], fuel: number): E {
     DEFS.push("def " + hm + "(x: " + ty_str(left) + ") -> U32:\n  "
       + (left.k === "u32" ? "x" : e_at(syn(U32C, [v_many("x", left)], 1))));
     const hk = "hk" + id;
-    DEFS.push("def " + hk + "(-F: U32 -> Type, g: @z: U32. F(z), h: (F(0) -> U32)) -> U32:\n  h(g(0))");
+    DEFS.push("def " + hk + "(-F: U32 -> Type, g: @z:U32 -> F(z), h: (F(0) -> U32)) -> U32:\n  h(g(0))");
     const call = hk + "(" + fam + ", " + pick + ", " + hm + ")";
     if (goal.k === "u32") {
       return e_atom(call);
@@ -1677,8 +1680,7 @@ export function syn_dep(goal: T, env: V[], fuel: number): E {
     const sg = "Sk" + id;
     const su = "us" + id;
     DECLS.push("type " + sg + "(A: Type, B: A -> Type):\n  " + sg + "a{a: A, b: B(a)}");
-    DEFS.push("def " + su + "(n: U32) -> " + ty_str(goal) + ":\n  s = {" + sg + "a{n, " + pick + "(n)} : "
-      + sg + "(U32, z => " + fam + "(z))}\n  match s:\n    case " + sg + "a{a, b}:\n      " + hop + "(a, b)");
+    DEFS.push("def " + su + "(n: U32) -> " + ty_str(goal) + ":\n  s : " + sg + "(U32, z => " + fam + "(z)) = " + sg + "." + sg + "a{n, " + pick + "(n)}\n  match s:\n    case " + sg + "." + sg + "a{a, b}:\n      " + hop + "(a, b)");
     DEFR.push({ name: su, tps: [], ps: [U32C], ret: goal });
     return e_defcall(su, su + "(" + e_at(num_gen_u32(env, 1)) + ")");
   }
@@ -1718,8 +1720,8 @@ export function builder_ensure(t: T & { k: "adt" }): string {
       return e_at(syn(ty_sub(f, m), c === base ? [] : env, 0));
     });
   DEFS.push("def " + name + "(n: U32) -> " + ty_str(t) + ":\n  match n:\n    case 0:\n      "
-    + base.name + "{" + fld(base, "").join(", ") + "}\n    case 1+n:\n      "
-    + rec.name + "{" + fld(rec, name + "(n)").join(", ") + "}");
+    + a.name + "." + base.name + "{" + fld(base, "").join(", ") + "}\n    case 1+n:\n      "
+    + a.name + "." + rec.name + "{" + fld(rec, name + "(n)").join(", ") + "}");
   DEFR.push({ name, tps: [], ps: [U32C], ret: t, mask: [4 + G.int(6)] });
   return name;
 }
@@ -1753,7 +1755,7 @@ export function rd_ensure(t: T): string {
       break;
     }
     case "f32": {
-      DEFS.push("def " + name + "(x: F32) -> U32:\n  $f32_to_u32(x * " + num_lit_f32(false).s + ")");
+      DEFS.push("def " + name + "(x: F32) -> U32:\n  F32.to_u32((x * " + num_lit_f32(false).s + "))");
       break;
     }
     case "adt": {
@@ -1763,7 +1765,7 @@ export function rd_ensure(t: T): string {
     case "fun": {
       const arg = t.dom.k === "f32" ? num_lit_f32(false) : num_lit_u32();
       const app = e_atom("f(" + arg.s + ")");
-      const res = t.cod.k === "f32" ? e_fn1("$f32_to_u32", app) : t.cod.k === "u32" ? app : e_atom(rd_ensure(t.cod) + "(" + app.s + ")");
+      const res = t.cod.k === "f32" ? e_fn1("F32.to_u32", app) : t.cod.k === "u32" ? app : e_atom(rd_ensure(t.cod) + "(" + app.s + ")");
       DEFS.push("def " + name + "(f: " + ty_str(t) + ") -> U32:\n  " + e_at(res));
       break;
     }
@@ -1793,7 +1795,7 @@ export function rd_deep(name: string, t: T & { k: "adt" }, param: T, selfkey: st
       return e_atom(v);
     }
     if (ft.k === "f32") {
-      return e_fn1("$f32_to_u32", e_bin(e_atom(v), "*", num_lit_f32(false)));
+      return e_fn1("F32.to_u32", e_bin(e_atom(v), "*", num_lit_f32(false)));
     }
     const fkey = "rd:" + ty_key(ft);
     return e_atom((fkey === selfkey || (f.k === "adt" && f.a === a) ? name : rd_ensure(ft)) + "(" + v + ")");
@@ -1847,7 +1849,7 @@ export function rd_match(name: string, t: T & { k: "adt" }, param: T, selfkey: s
         return [e_atom(vs[i])];
       }
       if (ft.k === "f32") {
-        return [e_fn1("$f32_to_u32", e_bin(e_atom(vs[i]), "*", num_lit_f32(false)))];
+        return [e_fn1("F32.to_u32", e_bin(e_atom(vs[i]), "*", num_lit_f32(false)))];
       }
       const fkey = "rd:" + ty_key(ft);
       const fname = fkey === selfkey || (f.k === "adt" && f.a === a) ? name : rd_ensure(ft);
@@ -1985,7 +1987,7 @@ export function generic_mint(): void {
   try {
     body = syn(ret, penv, 1);
   } catch {
-    body = ret.k === "u32" ? num_lit_u32() : ret.k === "tvar" ? e_atom("p0") : e_atom("Nil{}");
+    body = ret.k === "u32" ? num_lit_u32() : ret.k === "tvar" ? e_atom("p0") : e_atom("List.Nil{}");
   }
   const params = ps.map((p, i) => "p" + String(i) + ": " + ty_str(p));
   DEFS.push("def " + name + "<" + tps.join(",") + ">(" + params.join(", ") + ") -> " + ty_str(ret) + ":\n  " + e_at(body));
@@ -2009,7 +2011,7 @@ export function batch_ensure(): string {
   const c0 = String(G.int(4));
   const c1 = String(G.int(4));
   DEFS.push("def " + name + "(d: U32, i: U32) -> U32:\n  match d:\n    case 0:\n      " + leaf
-    + "\n    case 1+d:\n      a, b = " + name + "(d, i * 2 + " + c0 + "), " + name + "(d, i * 2 + " + c1 + ")\n      "
+    + "\n    case 1+d:\n      a & b = " + name + "(d, (i * 2) + " + c0 + ") & " + name + "(d, (i * 2) + " + c1 + ")\n      "
     + e_at(num_combine([e_atom("a"), e_atom("b")])));
   return name;
 }
@@ -2069,12 +2071,12 @@ export function match_body(env: V[], depth: number, ind: number): string {
             return [e_atom(vs[i])];
           }
           if (ft.k === "f32") {
-            return [e_fn1("$f32_to_u32", e_atom(vs[i]))];
+            return [e_fn1("F32.to_u32", e_atom(vs[i]))];
           }
           return [e_atom(rd_ensure(ft) + "(" + vs[i] + ")")];
         })
         .concat([num_gen_u32(env.concat(c.fields.flatMap((f, i) => (i !== c.er && ty_sub(f, m).k === "u32" ? [v_many(vs[i], U32C)] : []))), 1)]);
-      const pat = c.name + "{" + vs.join(", ") + "}";
+      const pat = a.name + "." + c.name + "{" + vs.join(", ") + "}";
       return pad + "  case " + pat + ":\n" + " ".repeat(ind + 4) + e_at(num_combine(folded));
     });
     feature_add("with");
@@ -2166,7 +2168,7 @@ export function string_call_char_def(env: V[]): E {
   IMPORTS.add("List");
   const name = "cv" + String(uid_next());
   const c1 = str_char();
-  DEFS.push("def " + name + "(c: Char) -> U32:\n  match c:\n    case '" + c1 + "':\n      " + e_at(num_gen_u32([], 1)) + "\n    case Char{n}:\n      n + " + String(G.int(99)));
+  DEFS.push("def " + name + "(c: Char) -> U32:\n  match c:\n    case '" + c1 + "':\n      " + e_at(num_gen_u32([], 1)) + "\n    case Char.Char{n}:\n      n + " + String(G.int(99)));
   const arg = G.chance(0.4) ? "'" + c1 + "'" : "'" + str_char() + "'";
   void env;
   return e_defcall(name, name + "(" + arg + ")");
@@ -2174,26 +2176,26 @@ export function string_call_char_def(env: V[]): E {
 
 // Do
 // --
-// a minted one-ctor monad + M::pure/M::bind and a def whose body is a do
+// a minted one-ctor monad + M.pure/M.bind and a def whose body is a do
 // block; parse-time sugar over the bind/pure convention.
 
 export function do_call_def(env: V[]): E {
   feature_add("do");
   const id = uid_next();
   const M = "Bx" + String(id);
-  const C = M + "v";
-  DECLS.push("type " + M + "<A>:\n  " + C + "{v: A}");
-  DEFS.push("def " + M + "::pure<A>(x: A) -> " + M + "<A>:\n  " + C + "{x}");
-  DEFS.push("def " + M + "::bind<A,B>(m: " + M + "<A>, f: A -> " + M + "<B>) -> " + M + "<B>:\n  match m:\n    case " + C + "{v}:\n      f(v)");
+  const C = M + "." + M + "v";
+  DECLS.push("type " + M + "<A>:\n  " + M + "v{v: A}");
+  DEFS.push("def " + M + ".pure<A>(x: A) -> " + M + "(A):\n  " + C + "{x}");
+  DEFS.push("def " + M + ".bind<A,B>(m: " + M + "(A), f: A -> " + M + "(B)) -> " + M + "(B):\n  match m:\n    case " + C + "{v}:\n      f(v)");
   const un = "ub" + String(uid_next());
-  DEFS.push("def " + un + "(b: " + M + "<U32>) -> U32:\n  match b:\n    case " + C + "{v}:\n      v");
+  DEFS.push("def " + un + "(b: " + M + "(U32)) -> U32:\n  match b:\n    case " + C + "{v}:\n      v");
   const name = "dm" + String(uid_next());
   const henv: V[] = [v_many("n", U32C)];
   const x = "x" + String(uid_next());
   const y = "y" + String(uid_next());
-  DEFS.push("def " + name + "(n: U32) -> " + M + "<U32>:\n  do " + M + "<U32>:\n    "
-    + x + " <- {" + C + "{" + e_at(num_gen_u32(henv, 1)) + "} : " + M + "<U32>}\n    "
-    + y + " <- {" + C + "{" + e_at(num_gen_u32(henv.concat([v_many(x, U32C)]), 1)) + "} : " + M + "<U32>}\n    "
+  DEFS.push("def " + name + "(n: U32) -> " + M + "(U32):\n  do " + M + "(U32):\n    "
+    + x + " <- (" + C + "{" + e_at(num_gen_u32(henv, 1)) + "} : " + M + "(U32))\n    "
+    + y + " <- (" + C + "{" + e_at(num_gen_u32(henv.concat([v_many(x, U32C)]), 1)) + "} : " + M + "(U32))\n    "
     + "return " + e_at(num_combine([e_atom(x), e_atom(y), num_gen_u32(henv, 0)])));
   return e_defcall(un, un + "(" + name + "(" + e_at(num_gen_u32(env, 1)) + "))");
 }
@@ -2209,9 +2211,9 @@ export function theorem_gen(): { N: string; th: string; z: string; s: string; ad
   feature_add("thm");
   const id = uid_next();
   const N = "Nt" + String(id);
-  const Z = N + "z";
-  const S = N + "s";
-  DECLS.push("type " + N + ":\n  " + Z + "{}\n  " + S + "{p: " + N + "}");
+  const Z = N + "." + N + "z";
+  const S = N + "." + N + "s";
+  DECLS.push("type " + N + ":\n  " + N + "z{}\n  " + N + "s{p: " + N + "}");
   // k : the OP under proof is generated -- op(z, b) = S^k(b) and
   // op(s{p}, b) = S^m(op(p, b)) denote S^(m*a+k)(b), so the shift law
   // op(a, s{b}) = s{op(a, b)} holds for EVERY k and m by the same
@@ -2233,10 +2235,10 @@ export function theorem_gen(): { N: string; th: string; z: string; s: string; ad
   if (k > 0 || m > 1 || G.chance(0.5)) {
     feature_add("thm-shift");
     const b = "b" + String(uid_next());
-    DEFS.push("def " + th + "(a: " + N + ", " + b + ": " + N + ") -> {" + add + "(a, " + S + "{" + b + "}) = " + S + "{" + add + "(a, " + b + ")} : " + N + "}:\n  match a:\n    case " + Z + "{}:\n      {=}\n    case " + S + "{p}:\n      %" + th + "(p, " + b + ")\n      {=}");
+    DEFS.push("def " + th + "(a: " + N + ", " + b + ": " + N + ") -> {" + add + "(a, " + S + "{" + b + "}) == " + S + "{" + add + "(a, " + b + ")} : " + N + "}:\n  match a:\n    case " + Z + "{}:\n      {==}\n    case " + S + "{p}:\n      %" + th + "(p, " + b + ")\n      {==}");
     return { N, th, z: Z, s: S, add, arity: 2 };
   }
-  DEFS.push("def " + th + "(a: " + N + ") -> {" + add + "(a, " + Z + "{}) = a : " + N + "}:\n  match a:\n    case " + Z + "{}:\n      {=}\n    case " + S + "{p}:\n      %" + th + "(p)\n      {=}");
+  DEFS.push("def " + th + "(a: " + N + ") -> {" + add + "(a, " + Z + "{}) == a : " + N + "}:\n  match a:\n    case " + Z + "{}:\n      {==}\n    case " + S + "{p}:\n      %" + th + "(p)\n      {==}");
   return { N, th, z: Z, s: S, add, arity: 1 };
 }
 
@@ -2256,11 +2258,11 @@ export function destructure_gen(): { defname: string } {
   ADTS.push(a);
   const mk = "mr" + String(uid_next());
   const menv: V[] = [v_many("n", U32C)];
-  DEFS.push("def " + mk + "(n: U32) -> " + a.name + ":\n  " + a.ctors[0].name + "{" + a.ctors[0].fields.map(() => e_at(num_gen_u32(menv, 1))).join(", ") + "}");
+  DEFS.push("def " + mk + "(n: U32) -> " + a.name + ":\n  " + a.name + "." + a.ctors[0].name + "{" + a.ctors[0].fields.map(() => e_at(num_gen_u32(menv, 1))).join(", ") + "}");
   const name = "ds" + String(uid_next());
   const vs = a.ctors[0].fields.map((_, i) => "d" + String(i));
   const denv: V[] = vs.map((v) => v_many(v, U32C)).concat([v_many("n", U32C)]);
-  DEFS.push("def " + name + "(n: U32) -> U32:\n  " + a.ctors[0].name + "{" + vs.join(", ") + "} = " + mk + "(" + e_at(num_gen_u32([v_many("n", U32C)], 1)) + ")\n  " + e_at(num_combine(vs.map((v) => e_atom(v)).concat([num_gen_u32(denv, 1)]))));
+  DEFS.push("def " + name + "(n: U32) -> U32:\n  " + a.name + "." + a.ctors[0].name + "{" + vs.join(", ") + "} = " + mk + "(" + e_at(num_gen_u32([v_many("n", U32C)], 1)) + ")\n  " + e_at(num_combine(vs.map((v) => e_atom(v)).concat([num_gen_u32(denv, 1)]))));
   return { defname: name };
 }
 
@@ -2376,12 +2378,17 @@ export function let_eql(env: V[]): Line {
     const b = num();
     const lhs = "(" + String(a) + " " + op + " " + String(b) + ")";
     const r = String(f(a, b));
-    ety = G.chance(0.5) ? "{" + lhs + " = " + r + " : U32}" : "{" + r + " = " + lhs + " : U32}";
+    ety = G.chance(0.5) ? "{" + lhs + " == " + r + " : U32}" : "{" + r + " == " + lhs + " : U32}";
   } else {
     const base = syn_ty(1, true);
     let t = base.k === "eql" ? U32C : base;
     const menv = env.filter((v) => v.q === "many");
-    let side = e_at(syn(t, menv, 1));
+    // an equation side sits in OPERAND position (== is a delimiter, and
+    // op2 no longer associates), so a non-atomic side needs parens in
+    // BOTH modes -- e_at would drop them under MIN_PARENS and the
+    // min-parens sibling would be rejected
+    const sideE = syn(t, menv, 1);
+    let side = sideE.p === 99 ? sideE.s : "(" + sideE.s + ")";
     const prev = SIDES.get(side);
     if (prev !== undefined && prev !== ty_key(t)) {
       t = U32C;
@@ -2391,7 +2398,7 @@ export function let_eql(env: V[]): Line {
     ety = ty_str({ k: "eql", t, side });
     safe = t.k === "u32" || t.k === "f32" || (t.k === "adt" && t.args.length === 0);
   }
-  const etext = x + " = {{=} : " + ety + "}";
+  const etext = x + " : " + ety + " = {==}";
   if (safe && G.chance(0.35)) {
     feature_add("rwte");
     const w = "v" + String(uid_next());
@@ -2399,8 +2406,8 @@ export function let_eql(env: V[]): Line {
     // constant motive is a constant lambda; its body parse is greedy (a
     // following parenthesized term reads as its application), so the
     // explicit form needs the `;` separator
-    const mot = G.chance(0.4) ? x + " : mw" + String(uid_next()) + " => U32; " : " " + x + " ";
-    return { text: etext + "\n  " + w + " = {(%" + mot + e_at(num_gen_u32(env, 1)) + ") : U32}", binds: [w], vars: [v_many(w, U32C)] };
+    const mot = G.chance(0.4) ? x + " : mw" + String(uid_next()) + " => U32; " : x + "; ";
+    return { text: etext + "\n  " + w + " : U32 = (%" + mot + e_at(num_gen_u32(env, 1)) + ")", binds: [w], vars: [v_many(w, U32C)] };
   }
   return { text: etext, binds: [], vars: [], eqs: safe ? [x] : [] };
 }
@@ -2432,7 +2439,7 @@ export function let_fork(env: V[]): Line {
     vals[j] = t;
   }
   const ks = vals.map(() => "p" + String(uid_next()));
-  return { text: ks.join(", ") + " = " + vals.join(", "), binds: ks, vars: ks.map((k) => v_many(k, U32C)) };
+  return { text: ks.join(" & ") + " = " + vals.join(" & "), binds: ks, vars: ks.map((k) => v_many(k, U32C)) };
 }
 
 export function let_adt_dflt(a: Adt): string | null {
@@ -2441,7 +2448,7 @@ export function let_adt_dflt(a: Adt): string | null {
     return null;
   }
   const c = G.pick(ok);
-  return c.fields.length === 0 ? c.name + "{}" : c.name + "{" + String(G.int(64)) + "}";
+  return c.fields.length === 0 ? a.name + "." + c.name + "{}" : a.name + "." + c.name + "{" + String(G.int(64)) + "}";
 }
 
 export function let_array(env: V[]): Line {
@@ -2456,7 +2463,7 @@ export function let_array(env: V[]): Line {
   const wrap = (e: E): string => (e.p === 99 ? e.s : "(" + e.s + ")");
   const elV = (): string => {
     const v = syn(elT, env, a !== null ? 1 : 0);
-    return a !== null ? "{" + v.s + " : " + a.name + "}" : wrap(v);
+    return a !== null ? "(" + v.s + " : " + a.name + ")" : wrap(v);
   };
   const dflt = a !== null ? (let_adt_dflt(a) as string) : String(G.int(100));
   const big = a === null && G.chance(0.05);
@@ -2467,9 +2474,9 @@ export function let_array(env: V[]): Line {
   }
   const maxk = keys.length > 0 ? keys[keys.length - 1] : 0;
   const len = maxk < 8 ? 8 : 2 ** (32 - Math.clz32(maxk));
-  const lit = "[" + keys.map((k) => String(k) + ": " + elV() + ", ").join("") + "_: " + dflt + "; " + String(len) + "]";
+  const lit = "![" + keys.map((k) => String(k) + ": " + elV() + ", ").join("") + "_: " + dflt + "; " + String(len) + "]";
   let cur = "ar" + String(uid_next());
-  const lines: string[] = [cur + " = {" + lit + " : " + tyArr + "}"];
+  const lines: string[] = [cur + " : " + tyArr + " = " + lit];
   const binds: string[] = [];
   const vars: V[] = [];
   const idx = (): string => {
@@ -2517,7 +2524,7 @@ export function let_float(env: V[]): Line {
   const f = "f" + String(uid_next());
   const x = "v" + String(uid_next());
   const val = num_gen_f32(env, 2 + G.int(2));
-  const rhs = G.chance(0.7) ? e_fn1("$f32_to_u32", e_atom(f)) : e_bin(e_atom(f), G.pick(["<", "<=", ">=", "!=", "=="]), num_gen_f32(env, 2));
+  const rhs = G.chance(0.7) ? e_fn1("F32.to_u32", e_atom(f)) : e_bin(e_atom(f), G.pick(["<", "<=", ">=", "!=", "=="]), num_gen_f32(env, 2));
   return { text: e_ann_bind(f, val, "F32") + "\n  " + x + " = " + e_at(rhs), binds: [x], vars: [v_many(f, F32C), v_many(x, U32C)] };
 }
 
@@ -2559,7 +2566,7 @@ export function let_partial(env: V[]): Line {
   } else {
     const fun: T = { k: "fun", dom: U32C, cod: U32C };
     const lam = syn(fun, env, 1);
-    lines.push(g + " = {" + lam.s + " : " + ty_str(fun) + "}");
+    lines.push(g + " : " + ty_str(fun) + " = " + lam.s);
     const hf = "hg" + String(uid_next());
     DEFS.push("def " + hf + "(f: (U32 -> U32), x: U32) -> U32:\n  f(x) + x");
     lines.push(x + " = " + hf + "(" + g + ", " + e_at(num_gen_u32(env, 1)) + ")");
@@ -2582,20 +2589,20 @@ export function let_truth(env: V[]): Line {
   const hi = String(G.int(1000));
   const body = G.wpick<() => string>([
     // truth_pat : T{}/F{} patterns over a U32 scrutinee: term_elab_split wraps it in
-    // Bool::from_u32
+    // Bool.from_u32
     [10, () => {
       feature_add("truth-pat");
-      return "  match n:\n    case T{}:\n      " + lo + "\n    case F{}:\n      " + hi;
+      return "  match n:\n    case Bool.T{}:\n      " + lo + "\n    case Bool.F{}:\n      " + hi;
     }],
     // truth_if : an if over a Bool: term_check's Swi arm rebuilds it as the F/T match
     [9, () => {
       feature_add("truth-if");
-      return "  if Bool::from_u32(n):\n    " + lo + "\n  else:\n    " + hi;
+      return "  if Bool.from_u32(n):\n    " + lo + "\n  else:\n    " + hi;
     }],
     // truth_meet : a U32 met where Bool is expected coerces at term_elab_meet
     [8, () => {
       feature_add("truth-meet");
-      return "  Bool::to_u32(Bool::not(n)) + " + lo;
+      return "  Bool.to_u32(Bool.not(n)) + " + lo;
     }],
   ])();
   DEFS.push("def " + name + "(n: U32) -> U32:\n" + body);
@@ -2677,21 +2684,81 @@ export function mod_names(entry: string): string[] {
   return m === null ? [] : [m[1].replace(/:+$/, "")];
 }
 
-// mod_qualify : rewrite whole-identifier occurrences of moved names to
-// their <mod>::<name> spelling, skipping string/char/backtick literals
-export function mod_qualify(text: string, map: Map<string, string>): string {
-  if (map.size === 0) {
-    return text;
-  }
-  const lit = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'|`[^`]`/g;
-  const sub = (s: string): string => s.replace(/[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*/g, (w) => map.get(w) ?? w);
+// mod_qualify : identity since the 2026-08-05 src-split -- entry names
+// are GLOBAL across files (no module namespaces), so a moved def is
+// referenced bare; the map argument survives for the split's bookkeeping
+export function mod_qualify(text: string, _map: Map<string, string>): string {
+  return text;
+}
+
+// io_parenify : the 2026-08-05 grammar spells generic application and
+// type application with PARENS, not angle brackets. The io templates
+// and their assembled call sites still read `Name<T..>(a..)` and
+// `IO<T>`; this rewrites both. It is safe against the object language's
+// `<`/`>` COMPARISON operators because e_bin always emits them spaced
+// (`a < b`) whereas a generic head abuts its `<` (`IO.bind<`) -- so we
+// only fire on a `<` glued to an identifier char. `def`/`type Name<T..>`
+// DECLARATION heads keep their angle binders, so a `<` right after
+// `def <ident>` or `type <ident>` is skipped.
+export function io_parenify(text: string): string {
+  const idc = (c: string): boolean => /[A-Za-z0-9_.]/.test(c);
   let out = "";
-  let last = 0;
-  for (const m of text.matchAll(lit)) {
-    out += sub(text.slice(last, m.index)) + m[0];
-    last = m.index + m[0].length;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    // a generic `<` glued to an identifier (no space) and angle-balanced
+    if (c === "<" && i > 0 && idc(text[i - 1])) {
+      // find the head start and reject a `def <head><` declaration
+      let hs = i;
+      while (hs > 0 && idc(text[hs - 1])) {
+        hs -= 1;
+      }
+      const isDecl = /(^|[^A-Za-z0-9_])(def|type)\s+$/.test(text.slice(0, hs));
+      let depth = 0;
+      let j = i;
+      for (; j < text.length; j++) {
+        if (text[j] === "<") {
+          depth += 1;
+        } else if (text[j] === ">") {
+          depth -= 1;
+          if (depth === 0) {
+            break;
+          }
+        }
+      }
+      if (!isDecl && depth === 0 && j < text.length) {
+        const inner = io_parenify(text.slice(i + 1, j));
+        const after = text[j + 1] === "(";
+        if (after) {
+          // generic CALL: `f<T..>(a..)` -> `f(T.., a..)`
+          let k = 0;
+          let d2 = 0;
+          for (k = j + 2; k < text.length; k++) {
+            if (text[k] === "(") {
+              d2 += 1;
+            } else if (text[k] === ")") {
+              if (d2 === 0) {
+                break;
+              }
+              d2 -= 1;
+            }
+          }
+          const args = io_parenify(text.slice(j + 2, k));
+          const merged = args.trim().length > 0 ? inner + ", " + args : inner;
+          out += "(" + merged + ")";
+          i = k + 1;
+          continue;
+        }
+        // type application: `T<A..>` -> `T(A..)`
+        out += "(" + inner + ")";
+        i = j + 1;
+        continue;
+      }
+    }
+    out += c;
+    i += 1;
   }
-  return out + sub(text.slice(last));
+  return out;
 }
 
 export type GenParts = { imps: string[]; decls: string[]; defs: string[]; seal: string; raw: string };
@@ -2748,7 +2815,7 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
     if (G.chance(0.5)) {
       feature_add("rwt");
       const n = "n" + String(uid_next());
-      lines.push(n + " = {" + t.s + "{" + t.s + "{" + t.z + "{}}} : " + t.N + "}");
+      lines.push(n + " : " + t.N + " = " + t.s + "{" + t.s + "{" + t.z + "{}}}");
       const az = t.arity === 2
         ? t.add + "(" + n + ", " + t.s + "{" + t.z + "{}})"
         : t.add + "(" + n + ", " + t.z + "{})";
@@ -2758,9 +2825,9 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
         feature_add("eqkit");
         IMPORTS.add("Equal");
         eqs.push(G.wpick<string>([
-          [3, "Equal::sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + ")"],
-          [2, "Equal::trans(" + t.N + ", " + az + ", " + rhs + ", " + az + ", " + e0 + ", Equal::sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + "))"],
-          [2, "Equal::cong(" + t.N + ", " + t.N + ", y => " + t.s + "{y}, " + az + ", " + rhs + ", " + e0 + ")"],
+          [3, "Equal.sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + ")"],
+          [2, "Equal.trans(" + t.N + ", " + az + ", " + rhs + ", " + az + ", " + e0 + ", Equal.sym(" + t.N + ", " + az + ", " + rhs + ", " + e0 + "))"],
+          [2, "Equal.cong(" + t.N + ", " + t.N + ", y => " + t.s + "{y}, " + az + ", " + rhs + ", " + e0 + ")"],
         ]));
       } else {
         eqs.push(e0);
@@ -2772,7 +2839,7 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
     const t = syn_ty(1, true);
     const v = syn(t, env, 1);
     // zz : through e_ann_bind, not hand-assembled: `{a != b : T}` in a brace
-    // statement parses as an inequality PROPOSITION (Empty::Not), which
+    // statement parses as an inequality PROPOSITION (Empty.Not), which
     // needs `import Empty`, and e_ann_bind is what knows to bind the `!=`
     // to a temp first
     const zz = "zz" + String(uid_next());
@@ -2791,7 +2858,7 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
     G.chance(0.3) ? "%" + e + " : mw" + String(uid_next()) + " => U32;" : "% " + e);
   const seal = e_at(num_seal(res));
   const fun = G.chance(0.7);
-  const imps = ["List", "Char", "String", "Pair", "Unit", "Bool", "Empty", "Equal"].filter((m) => IMPORTS.has(m)).map((m) => "import " + m);
+  const imps = ["List", "Char", "String", "Pair", "Unit", "Bool", "Empty", "Equal"].filter((m) => IMPORTS.has(m)).map((m) => "import ../bend-base/" + m);
   const body = (last: string): string => lines.concat([fin], rlines, [last]).join("\n  ");
   // mods : the book splits across SIBLING FILES -- all decls and a prefix
   // of the defs move out (defs are pushed in dependency order, so a
@@ -2799,14 +2866,14 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
   // ids, transitive loads, cross-file ctors and calls. Imports never
   // bind bare content names -- only ctor tags travel -- so every
   // cross-file reference to a moved type or def is rewritten to its
-  // qualified <mod>::<name> spelling (names are uid-unique, making
+  // qualified <mod>.<name> spelling (names are uid-unique, making
   // word-boundary replacement outside string/char literals sound).
   const files: Record<string, string> = {};
-  // monads : a do-block derives M::bind from the monad TYPE's spelled
-  // name, so the type and its ::-named defs cannot straddle a file
+  // monads : a do-block derives M.bind from the monad TYPE's spelled
+  // name, so the type and its .-named defs cannot straddle a file
   // boundary; a seed that minted a monad skips the split whole (the
   // prefix cut knows nothing about group boundaries)
-  const monadic = DEFS.some((d) => (mod_names(d)[0] ?? "").includes("::"));
+  const monadic = DEFS.some((d) => (mod_names(d)[0] ?? "").includes("."));
   const nmod = DEFS.length >= 2 && !flat && !monadic ? size_pick(G.chance(0.25) ? 1 + G.int(2) : 0, 6) : 0;
   const mods: string[] = [];
   const qmap = new Map<string, string>();
@@ -2823,7 +2890,7 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
       const sib = mods.length > 0 ? mods.map((m) => "import " + m).join("\n") + "\n\n" : "";
       files[id] = "# fuzz module\n\n" + head + sib + decls.join("\n\n") + (decls.length > 0 ? "\n\n" : "") + take.join("\n\n") + "\n";
       for (const nm of decls.concat(take).flatMap(mod_names)) {
-        qmap.set(nm, id.slice(2) + "::" + nm);
+        qmap.set(nm, id.slice(2) + "." + nm);
       }
       mods.push(id);
     }
@@ -2844,7 +2911,7 @@ export function gen_program(seed: bigint, minParens: boolean, uid0 = 0, flat = f
     return G.wpick<string>([[40, "\n\n"], [20, "\n\n\n"], [25, "\n\n# fz " + String(G.int(1024)) + "\n"], [15, "\n\n#\n\n"]]);
   };
   const source = (last: string, kind: string): string => {
-    const main = mod_qualify((fun ? "def main() -> U32:\n  " : "main : U32 =\n  ") + body(last), qmap);
+    const main = mod_qualify("def main() -> U32:\n  " + body(last), qmap);
     const parts = (imps.length > 0 || mods.length > 0
       ? [imps.concat(mods.map((m) => "import " + m)).join("\n")]
       : []).concat(mdecls).concat(mdefs).concat([main]);
@@ -2876,44 +2943,44 @@ const IO_HELPS: Record<string, { src: string; imps: string[] }> = {
   // every race, and the body of every timeout
   fz_slow: {
     src: "def fz_slow<A>(ms: U32, v: A) -> IO<A>:\n"
-      + "  IO::bind<Unit, A>(IO::sleep(ms), u => IO::pure<A>(v))",
+      + "  IO.bind<Unit, A>(IO.sleep(ms), u => IO.pure<A>(v))",
     imps: ["Unit"],
   },
   // fz_tmo : run x under an already-expired deadline: x is always cancelled, and
   // the Result never escapes (the generator never has to spell it)
   fz_tmo: {
     src: "def fz_tmo<A>(x: IO<A>) -> IO<Unit>:\n"
-      + "  IO::bind<Result<(U32 & String), A>, Unit>(IO::timeout<A>(0, x), r => IO::pure<Unit>(U{}))",
+      + "  IO.bind<Result<(U32 & String), A>, Unit>(IO.timeout<A>(0, x), r => IO.pure<Unit>(U{}))",
     imps: ["Unit", "Result", "String", "Pair"],
   },
   // fz_exec : exec's own yield is already a Result, so its cancelled form nests
   // one -- the shape repro_exec_cancel_orphan was written in
   fz_exec: {
     src: "def fz_exec(cmd: String) -> IO<Unit>:\n"
-      + "  IO::bind<Result<(U32 & String), Result<(U32 & String), Bytes>>, Unit>(\n"
-      + "    IO::timeout<Result<(U32 & String), Bytes>>(0, IO::exec(cmd)), r => IO::pure<Unit>(U{}))",
+      + "  IO.bind<Result<(U32 & String), Result<(U32 & String), Bytes>>, Unit>(\n"
+      + "    IO.timeout<Result<(U32 & String), Bytes>>(0, IO.exec(cmd)), r => IO.pure<Unit>(U{}))",
     imps: ["Unit", "Result", "String", "Pair", "Bytes"],
   },
   // fz_wait : block on a child that never finishes: the waiter parks in JOIN and
   // owns a live subtree, so cancelling it must take both
   fz_wait: {
     src: "def fz_wait<A>(x: IO<A>) -> IO<A>:\n"
-      + "  IO::bind<IO::Task<A>, A>(IO::fork<A>(x), t => IO::join<A>(t))",
+      + "  IO.bind<IO.Task<A>, A>(IO.fork<A>(x), t => IO.join<A>(t))",
     imps: [],
   },
   // fz_kill : the explicit Cancel op: consume the handle by cancelling instead of
   // joining (Task is linear -- exactly one of the two)
   fz_kill: {
     src: "def fz_kill<A>(x: IO<A>) -> IO<Unit>:\n"
-      + "  IO::bind<IO::Task<A>, Unit>(IO::fork<A>(x), t =>\n"
-      + "    IO::bind<Bool, Unit>(IO::cancel<A>(t), b => IO::pure<Unit>(U{})))",
+      + "  IO.bind<IO.Task<A>, Unit>(IO.fork<A>(x), t =>\n"
+      + "    IO.bind<Bool, Unit>(IO.cancel<A>(t), b => IO.pure<Unit>(U{})))",
     imps: ["Unit", "Bool"],
   },
   // fz_fd : parks on fd 0 -- the harness gives every binary an open, empty stdin
   // pipe, so this never answers. The one way to a cancelled FIB_FD.
   fz_fd: {
     src: "def fz_fd<A>(v: A) -> IO<A>:\n"
-      + "  IO::bind<Result<(U32 & String), String>, A>(IO::read_line(), r => IO::pure<A>(v))",
+      + "  IO.bind<Result<(U32 & String), String>, A>(IO.read_line(), r => IO.pure<A>(v))",
     imps: ["Result", "String", "Pair"],
   },
   // fz_hold : holds a LIVE child across whatever cancels it -- uncancelled exec,
@@ -2922,7 +2989,7 @@ const IO_HELPS: Record<string, { src: string; imps: string[] }> = {
   // see (it runs before main emits).
   fz_hold: {
     src: "def fz_hold(cmd: String) -> IO<Unit>:\n"
-      + "  IO::bind<Result<(U32 & String), Bytes>, Unit>(IO::exec(cmd), r => IO::pure<Unit>(U{}))",
+      + "  IO.bind<Result<(U32 & String), Bytes>, Unit>(IO.exec(cmd), r => IO.pure<Unit>(U{}))",
     imps: ["Unit", "Result", "String", "Pair", "Bytes"],
   },
   // fz_prod : producer half of fz_pipe: the second send parks on the full buffer
@@ -2932,9 +2999,9 @@ const IO_HELPS: Record<string, { src: string; imps: string[] }> = {
   // cannot contract, and every helper here uses c more than once.
   fz_prod: {
     src: "def fz_prod(c: Chan<U32>, v: U32, w: U32) -> IO<Unit>:\n"
-      + "  IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<U32>(c, v), r1 =>\n"
-      + "    IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<U32>(c, w), r2 =>\n"
-      + "      IO::pure<Unit>(U{})))",
+      + "  IO.bind<Result<(U32 & String), Unit>, Unit>(Chan.send<U32>(c, v), r1 =>\n"
+      + "    IO.bind<Result<(U32 & String), Unit>, Unit>(Chan.send<U32>(c, w), r2 =>\n"
+      + "      IO.pure<Unit>(U{})))",
     imps: ["Unit", "Result", "String", "Pair", "IO/Chan"],
   },
   // fz_pipe : a channel used for what channels are for. Whichever side runs first,
@@ -2944,30 +3011,30 @@ const IO_HELPS: Record<string, { src: string; imps: string[] }> = {
   // end-of-stream Fail and the send-to-closed drop.
   fz_pipe: {
     src: "def fz_pipe(v: U32, w: U32) -> IO<Unit>:\n"
-      + "  IO::bind<Chan<U32>, Unit>(Chan::new<U32>(1), c =>\n"
-      + "    IO::bind<Unit, Unit>(IO::spawn(fz_prod(c, v, w)), u =>\n"
-      + "      IO::bind<Result<(U32 & String), U32>, Unit>(Chan::recv<U32>(c), r1 =>\n"
-      + "        IO::bind<Result<(U32 & String), U32>, Unit>(Chan::recv<U32>(c), r2 =>\n"
-      + "          IO::bind<Bool, Unit>(Chan::close<U32>(c), b =>\n"
-      + "            IO::bind<Result<(U32 & String), U32>, Unit>(Chan::recv<U32>(c), r3 =>\n"
-      + "              IO::pure<Unit>(U{})))))))",
+      + "  IO.bind<Chan<U32>, Unit>(Chan.new<U32>(1), c =>\n"
+      + "    IO.bind<Unit, Unit>(IO.spawn(fz_prod(c, v, w)), u =>\n"
+      + "      IO.bind<Result<(U32 & String), U32>, Unit>(Chan.recv<U32>(c), r1 =>\n"
+      + "        IO.bind<Result<(U32 & String), U32>, Unit>(Chan.recv<U32>(c), r2 =>\n"
+      + "          IO.bind<Bool, Unit>(Chan.close<U32>(c), b =>\n"
+      + "            IO.bind<Result<(U32 & String), U32>, Unit>(Chan.recv<U32>(c), r3 =>\n"
+      + "              IO.pure<Unit>(U{})))))))",
     imps: ["Unit", "Bool", "Result", "String", "Pair", "IO/Chan"],
   },
   // fz_recv : a receiver cancelled while parked on an empty channel (reg/349)
   fz_recv: {
     src: "def fz_recv() -> IO<Unit>:\n"
-      + "  IO::bind<Chan<U32>, Unit>(Chan::new<U32>(1), c =>\n"
-      + "    IO::bind<Unit, Unit>(fz_tmo<Result<(U32 & String), U32>>(Chan::recv<U32>(c)), u =>\n"
-      + "      IO::bind<Bool, Unit>(Chan::close<U32>(c), b => IO::pure<Unit>(U{}))))",
+      + "  IO.bind<Chan<U32>, Unit>(Chan.new<U32>(1), c =>\n"
+      + "    IO.bind<Unit, Unit>(fz_tmo<Result<(U32 & String), U32>>(Chan.recv<U32>(c)), u =>\n"
+      + "      IO.bind<Bool, Unit>(Chan.close<U32>(c), b => IO.pure<Unit>(U{}))))",
     imps: ["Unit", "Bool", "Result", "String", "Pair", "IO/Chan"],
   },
   // fz_send : a sender cancelled while parked on a full one
   fz_send: {
     src: "def fz_send(v: U32, w: U32) -> IO<Unit>:\n"
-      + "  IO::bind<Chan<U32>, Unit>(Chan::new<U32>(1), c =>\n"
-      + "    IO::bind<Result<(U32 & String), Unit>, Unit>(Chan::send<U32>(c, v), r =>\n"
-      + "      IO::bind<Unit, Unit>(fz_tmo<Result<(U32 & String), Unit>>(Chan::send<U32>(c, w)), u =>\n"
-      + "        IO::bind<Bool, Unit>(Chan::close<U32>(c), b => IO::pure<Unit>(U{})))))",
+      + "  IO.bind<Chan<U32>, Unit>(Chan.new<U32>(1), c =>\n"
+      + "    IO.bind<Result<(U32 & String), Unit>, Unit>(Chan.send<U32>(c, v), r =>\n"
+      + "      IO.bind<Unit, Unit>(fz_tmo<Result<(U32 & String), Unit>>(Chan.send<U32>(c, w)), u =>\n"
+      + "        IO.bind<Bool, Unit>(Chan.close<U32>(c), b => IO.pure<Unit>(U{})))))",
     imps: ["Unit", "Bool", "Result", "String", "Pair", "IO/Chan"],
   },
 };
@@ -3014,12 +3081,12 @@ export function io_quiet(goal: T, env: V[], fuel: number, ctx: IoCtx): string {
     [16, () => io_help(ctx, "fz_wait") + "<" + g + ">(" + io_quiet(goal, env, fuel - 1, ctx) + ")"],
     // race : parked in RACING with two live children (cancel's default arm,
     // reached only through the subtree walk)
-    [14, () => "IO::race<" + g + ">(" + io_quiet(goal, env, fuel - 1, ctx) + ", "
+    [14, () => "IO.race<" + g + ">(" + io_quiet(goal, env, fuel - 1, ctx) + ", "
       + io_quiet(goal, env, fuel - 1, ctx) + ")"],
     // spawn : a spawned sibling still parked when the parent is cancelled
     [12, () => {
       const u = "qu" + String(uid_next());
-      return "IO::bind<Unit," + g + ">(IO::spawn(" + io_help(ctx, "fz_slow") + "<Unit>("
+      return "IO.bind<Unit," + g + ">(IO.spawn(" + io_help(ctx, "fz_slow") + "<Unit>("
         + io_never() + ", U{})), " + u + " => " + io_quiet(goal, env, fuel - 1, ctx) + ")";
     }],
     // fz_fd : parked on an fd instead of a timer
@@ -3030,7 +3097,7 @@ export function io_quiet(goal: T, env: V[], fuel: number, ctx: IoCtx): string {
       const mark = "fzhold_" + ctx.key + "_" + String(uid_next());
       ctx.marks.push(mark);
       const u = "qh" + String(uid_next());
-      return "IO::bind<Unit," + g + ">(" + io_help(ctx, "fz_hold") + "(\"sleep 600; echo "
+      return "IO.bind<Unit," + g + ">(" + io_help(ctx, "fz_hold") + "(\"sleep 600; echo "
         + mark + "\"), " + u + " => " + leaf() + ")";
     }],
   ])();
@@ -3042,7 +3109,7 @@ export function io_timeout(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm 
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_tmo") + "<" + ty_str(inner) + ">("
+    s: "IO.bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_tmo") + "<" + ty_str(inner) + ">("
       + io_quiet(inner, env, fuel, ctx) + "), " + x + " => " + rest.s + ")",
     out: rest.out,
   };
@@ -3055,7 +3122,7 @@ export function io_race(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, won)]), fuel - 1, ctx);
   return {
-    s: "IO::bind<" + ty_str(won) + "," + ty_str(goal) + ">(IO::race<" + ty_str(won) + ">(IO::pure<"
+    s: "IO.bind<" + ty_str(won) + "," + ty_str(goal) + ">(IO.race<" + ty_str(won) + ">(IO.pure<"
       + ty_str(won) + ">(" + e_at(fast) + "), " + io_quiet(won, env, fuel, ctx) + "), " + x + " => " + rest.s + ")",
     out: rest.out,
   };
@@ -3069,7 +3136,7 @@ export function io_spawn(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(IO::spawn(" + io_quiet(need_unit(), env, fuel, ctx)
+    s: "IO.bind<Unit," + ty_str(goal) + ">(IO.spawn(" + io_quiet(need_unit(), env, fuel, ctx)
       + "), " + x + " => " + rest.s + ")",
     out: rest.out,
   };
@@ -3085,7 +3152,7 @@ export function io_exec(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_exec") + "(\"sleep 600; echo "
+    s: "IO.bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_exec") + "(\"sleep 600; echo "
       + mark + "\"), " + x + " => " + rest.s + ")",
     out: rest.out,
   };
@@ -3093,7 +3160,7 @@ export function io_exec(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
 
 export function io_pure(goal: T, env: V[], fuel: number): IoTerm {
   const value = syn(goal, env, Math.max(0, fuel));
-  return { s: "IO::pure<" + ty_str(goal) + ">(" + e_at(value) + ")", out: [] };
+  return { s: "IO.pure<" + ty_str(goal) + ">(" + e_at(value) + ")", out: [] };
 }
 
 export function io_print(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
@@ -3104,13 +3171,13 @@ export function io_print(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const unit = need_unit();
   const rest = io_syn(goal, env.concat([v_many(x, unit)]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(IO::print(\"" + text + "\"), " + x + " => " + rest.s + ")",
+    s: "IO.bind<Unit," + ty_str(goal) + ">(IO.print(\"" + text + "\"), " + x + " => " + rest.s + ")",
     out: [text].concat(rest.out),
   };
 }
 
 // io_ffi is DEAD: the ratified Op ruling admits only the hand-written
-// IO::Op rows -- a C-bodied def compiles only when its camelized name
+// IO.Op rows -- a C-bodied def compiles only when its camelized name
 // matches an install Op ctor, so per-seed minted effects (and the C
 // leak probe that rode the same ABI) cannot compile anymore. The
 // marshalling boundary is covered by the base ops the other arms drive.
@@ -3123,10 +3190,10 @@ export function io_fork(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const task = "it" + String(uid_next());
   const value = "iv" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(value, yielded)]), fuel - 1, ctx);
-  const inner = "IO::bind<" + ty_str(yielded) + "," + ty_str(goal) + ">(IO::join<"
+  const inner = "IO.bind<" + ty_str(yielded) + "," + ty_str(goal) + ">(IO.join<"
     + ty_str(yielded) + ">(" + task + "), " + value + " => " + rest.s + ")";
   return {
-    s: "IO::bind<IO::Task<" + ty_str(yielded) + ">," + ty_str(goal) + ">(IO::fork<"
+    s: "IO.bind<IO.Task<" + ty_str(yielded) + ">," + ty_str(goal) + ">(IO.fork<"
       + ty_str(yielded) + ">(" + child_io.s + "), " + task + " => " + inner + ")",
     out: child_io.out.concat(rest.out),
   };
@@ -3140,7 +3207,7 @@ export function io_kill(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_kill") + "<" + ty_str(held) + ">("
+    s: "IO.bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_kill") + "<" + ty_str(held) + ">("
       + io_quiet(held, env, fuel, ctx) + "), " + x + " => " + rest.s + ")",
     out: rest.out,
   };
@@ -3149,11 +3216,11 @@ export function io_kill(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
 // IO_QUIET_EFFS : a fiber cancelled while parked on a channel -- the SEND and RECV arms
 // of io_fib_cancel, which no other shape reaches
 const IO_QUIET_EFFS: { call: string; yield: string; imps: string[] }[] = [
-  { call: "IO::now()", yield: "U32", imps: [] },
-  { call: "IO::now_ms()", yield: "U32", imps: [] },
-  { call: "IO::rand_word()", yield: "U32", imps: [] },
-  { call: "IO::args()", yield: "List<String>", imps: ["List", "String"] },
-  { call: "IO::get_env(\"FZ_UNSET\")", yield: "Result<(U32 & String), String>", imps: ["Result", "String", "Pair"] },
+  { call: "IO.now()", yield: "U32", imps: [] },
+  { call: "IO.now_ms()", yield: "U32", imps: [] },
+  { call: "IO.rand_word()", yield: "U32", imps: [] },
+  { call: "IO.args()", yield: "List<String>", imps: ["List", "String"] },
+  { call: "IO.get_env(\"FZ_UNSET\")", yield: "Result<(U32 & String), String>", imps: ["Result", "String", "Pair"] },
 ];
 
 // io_eff : effects bound and DROPPED: their values are nondeterministic (a clock,
@@ -3168,7 +3235,7 @@ export function io_eff(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env, fuel - 1, ctx);
   return {
-    s: "IO::bind<" + e.yield + "," + ty_str(goal) + ">(" + e.call + ", " + x + " => " + rest.s + ")",
+    s: "IO.bind<" + e.yield + "," + ty_str(goal) + ">(" + e.call + ", " + x + " => " + rest.s + ")",
     out: rest.out,
   };
 }
@@ -3179,7 +3246,7 @@ export function io_pipe(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_pipe") + "("
+    s: "IO.bind<Unit," + ty_str(goal) + ">(" + io_help(ctx, "fz_pipe") + "("
       + e_at(num_gen_u32(cap2, 1)) + ", " + e_at(num_gen_u32(cap2, 1)) + "), " + x + " => " + rest.s + ")",
     out: rest.out,
   };
@@ -3195,7 +3262,7 @@ export function io_chan(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "io" + String(uid_next());
   const rest = io_syn(goal, env.concat([v_many(x, need_unit())]), fuel - 1, ctx);
   return {
-    s: "IO::bind<Unit," + ty_str(goal) + ">(" + call + ", " + x + " => " + rest.s + ")",
+    s: "IO.bind<Unit," + ty_str(goal) + ">(" + call + ", " + x + " => " + rest.s + ")",
     out: rest.out,
   };
 }
@@ -3218,10 +3285,10 @@ export function io_do(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
     outs.push(act.out);
     if (G.chance(0.3)) {
       feature_add("dobare");
-      lines.push("    {" + act.s + " : IO<" + ty_str(yt) + ">}");
+      lines.push("    (" + act.s + " : IO<" + ty_str(yt) + ">)");
     } else {
       const x = "dv" + String(uid_next());
-      lines.push("    " + x + " <- {" + act.s + " : IO<" + ty_str(yt) + ">}");
+      lines.push("    " + x + " <- (" + act.s + " : IO<" + ty_str(yt) + ">)");
       if (yt.k === "u32") {
         benv = benv.concat([v_many(x, U32C)]);
       }
@@ -3230,7 +3297,7 @@ export function io_do(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const fin = io_syn(goal, benv, Math.max(0, fuel - 2), ctx);
   outs.push(fin.out);
   DEFS.push("def " + name + "(" + caps.map((v) => v.name + ": U32").join(", ") + ") -> IO<" + g + ">:\n  do IO<" + g + ">:\n"
-    + lines.join("\n") + "\n    {" + fin.s + " : IO<" + g + ">}");
+    + lines.join("\n") + "\n    (" + fin.s + " : IO<" + g + ">)");
   return { s: name + "(" + caps.map((v) => v.name).join(", ") + ")", out: outs.flat() };
 }
 
@@ -3243,7 +3310,7 @@ export function io_val(t: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
     DEFS.push("def " + name + "() -> IO<" + ty_str(t) + ">:\n  " + act.s);
     return { s: name + "()", out: act.out };
   }
-  return { s: "IO::pure<" + ty_str(t) + ">(" + e_at(syn(t, env.filter((v) => v.q === "many"), Math.min(fuel, 1))) + ")", out: [] };
+  return { s: "IO.pure<" + ty_str(t) + ">(" + e_at(syn(t, env.filter((v) => v.q === "many"), Math.min(fuel, 1))) + ")", out: [] };
 }
 
 // io_first : IO as a FIRST-CLASS type. Values (io_val) flow through
@@ -3266,7 +3333,7 @@ export function io_first(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
     const name = "cb" + id;
     const inner = io_syn(goal, [v_many("k", U32C)], Math.max(0, fuel - 2), ctx);
     DEFS.push("def " + name + "(a: IO<" + ts + ">, b: IO<" + ty_str(t2) + ">, k: U32) -> IO<" + g + ">:\n  "
-      + "IO::bind<" + ts + "," + g + ">(a, x" + id + " => " + inner.s + ")");
+      + "IO.bind<" + ts + "," + g + ">(a, x" + id + " => " + inner.s + ")");
     const va = io_val(t, env, fuel - 1, ctx);
     const vb = io_val(t2, env, fuel - 1, ctx);
     return { s: name + "(" + va.s + ", " + vb.s + ", " + e_at(num_gen_u32(env, 1)) + ")", out: va.out.concat(inner.out) };
@@ -3279,7 +3346,7 @@ export function io_first(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
     const benv = t.k === "u32" ? env.concat([v_many(y, U32C)]) : env;
     const rest = io_syn(goal, benv, Math.max(0, fuel - 2), ctx);
     return {
-      s: "IO::bind<IO<" + ts + ">," + g + ">(IO::pure<IO<" + ts + ">>(" + v.s + "), " + x + " => IO::bind<" + ts + "," + g + ">(" + x + ", " + y + " => " + rest.s + "))",
+      s: "IO.bind<IO<" + ts + ">," + g + ">(IO.pure<IO<" + ts + ">>(" + v.s + "), " + x + " => IO.bind<" + ts + "," + g + ">(" + x + ", " + y + " => " + rest.s + "))",
       out: v.out.concat(rest.out),
     };
   }
@@ -3294,18 +3361,18 @@ export function io_first(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
       // wherever a type is accepted
       IMPORTS.add("Pair");
       DECLS.push("type " + W + ":\n  " + W + "a{a: (IO<" + ts + "> & U32)}");
-      DEFS.push("def " + name + "(w: " + W + ") -> IO<" + g + ">:\n  match w:\n    case " + W + "a{p}:\n      match p:\n        case (io" + id + ", k):\n          IO::bind<" + ts + "," + g + ">(io" + id + ", x" + id + " => " + inner.s + ")");
-      return { s: name + "(" + W + "a{(" + v.s + ", " + e_at(num_gen_u32(env, 1)) + ")})", out: v.out.concat(inner.out) };
+      DEFS.push("def " + name + "(w: " + W + ") -> IO<" + g + ">:\n  match w:\n    case " + W + "." + W + "a{p}:\n      match p:\n        case (io" + id + ", k):\n          IO.bind<" + ts + "," + g + ">(io" + id + ", x" + id + " => " + inner.s + ")");
+      return { s: name + "(" + W + "." + W + "a{(" + v.s + ", " + e_at(num_gen_u32(env, 1)) + ")})", out: v.out.concat(inner.out) };
     }
     DECLS.push("type " + W + ":\n  " + W + "a{a: IO<" + ts + ">, k: U32}");
-    DEFS.push("def " + name + "(w: " + W + ") -> IO<" + g + ">:\n  match w:\n    case " + W + "a{a, k}:\n      IO::bind<" + ts + "," + g + ">(a, x" + id + " => " + inner.s + ")");
-    return { s: name + "(" + W + "a{" + v.s + ", " + e_at(num_gen_u32(env, 1)) + "})", out: v.out.concat(inner.out) };
+    DEFS.push("def " + name + "(w: " + W + ") -> IO<" + g + ">:\n  match w:\n    case " + W + "." + W + "a{a, k}:\n      IO.bind<" + ts + "," + g + ">(a, x" + id + " => " + inner.s + ")");
+    return { s: name + "(" + W + "." + W + "a{" + v.s + ", " + e_at(num_gen_u32(env, 1)) + "})", out: v.out.concat(inner.out) };
   }
   feature_add("iokont");
   const name = "kn" + id;
   const inner = io_syn(goal, [v_many("k", U32C)], Math.max(0, fuel - 2), ctx);
   DEFS.push("def " + name + "(f: (U32 -> IO<" + ts + ">), s" + id + ": U32, k: U32) -> IO<" + g + ">:\n  "
-    + "IO::bind<" + ts + "," + g + ">(f(s" + id + "), x" + id + " => " + inner.s + ")");
+    + "IO.bind<" + ts + "," + g + ">(f(s" + id + "), x" + id + " => " + inner.s + ")");
   const b = "kb" + id;
   const larm = io_syn(t, env.concat([v_many(b, U32C)]), Math.max(0, fuel - 2), ctx);
   return {
@@ -3328,9 +3395,9 @@ export function io_base(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   const x = "bx" + id;
   const rest = io_syn(goal, env.concat([v_many(x, U32C)]), Math.max(0, fuel - 1), ctx);
   const word = (call: string, yt: string): IoTerm => (
-    { s: "IO::bind<" + yt + "," + g + ">(" + call + ", " + x + " => " + rest.s + ")", out: rest.out });
+    { s: "IO.bind<" + yt + "," + g + ">(" + call + ", " + x + " => " + rest.s + ")", out: rest.out });
   const read = (call: string, yt: string, rd: string): IoTerm => (
-    { s: "IO::bind<" + yt + "," + g + ">(" + call + ", r" + id + " => IO::bind<U32," + g + ">(IO::pure<U32>(" + rd + "(r" + id + ")), " + x + " => " + rest.s + "))", out: rest.out });
+    { s: "IO.bind<" + yt + "," + g + ">(" + call + ", r" + id + " => IO.bind<U32," + g + ">(IO.pure<U32>(" + rd + "(r" + id + ")), " + x + " => " + rest.s + "))", out: rest.out });
   const RS = "Result<(U32 & String), ";
   const shape = G.wpick<string>([[14, "all"], [12, "par"], [12, "tmo"], [10, "env"], [12, "file"], [6, "argv"], [10, "clock"], [8, "rand"], [8, "slp"], [8, "perr"]]);
   feature_add("base-" + shape);
@@ -3340,20 +3407,20 @@ export function io_base(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
   if (shape === "all") {
     IMPORTS.add("List");
     const rd = "bl" + id;
-    DEFS.push("def " + rd + "(xs: List<U32>) -> U32:\n  match xs:\n    case Cons{h, t}:\n      h\n    case Nil{}:\n      0");
-    const els = Array.from({ length: 2 + G.int(2) }, () => "IO::pure<U32>(" + e_at(num_gen_u32(env, 1)) + ")");
-    return read("IO::all<U32>([" + els.join(", ") + "])", "List<U32>", rd);
+    DEFS.push("def " + rd + "(xs: List(U32)) -> U32:\n  match xs:\n    case List.Cons{h, t}:\n      h\n    case List.Nil{}:\n      0");
+    const els = Array.from({ length: 2 + G.int(2) }, () => "IO.pure<U32>(" + e_at(num_gen_u32(env, 1)) + ")");
+    return read("IO.all<U32>([" + els.join(", ") + "])", "List<U32>", rd);
   }
   if (shape === "par") {
     const rd = "bp" + id;
     DEFS.push("def " + rd + "(p: (U32 & U32)) -> U32:\n  match p:\n    case (a, b):\n      (a + b)");
-    return read("IO::par<U32, U32>(IO::pure<U32>(" + e_at(num_gen_u32(env, 1)) + "), IO::pure<U32>(" + e_at(num_gen_u32(env, 1)) + "))", "(U32 & U32)", rd);
+    return read("IO.par<U32, U32>(IO.pure<U32>(" + e_at(num_gen_u32(env, 1)) + "), IO.pure<U32>(" + e_at(num_gen_u32(env, 1)) + "))", "(U32 & U32)", rd);
   }
   if (shape === "tmo") {
     IMPORTS.add("Result");
     const inner = io_val(U32C, env, Math.max(0, fuel - 1), ctx);
     const t = {
-      s: "IO::bind<" + RS + "U32>," + g + ">(IO::timeout<U32>(60000, " + inner.s + "), r" + id + " => IO::bind<U32," + g + ">(IO::unwrap<U32>(r" + id + "), " + x + " => " + rest.s + "))",
+      s: "IO.bind<" + RS + "U32>," + g + ">(IO.timeout<U32>(60000, " + inner.s + "), r" + id + " => IO.bind<U32," + g + ">(IO.unwrap<U32>(r" + id + "), " + x + " => " + rest.s + "))",
       out: inner.out.concat(rest.out),
     };
     return t;
@@ -3363,36 +3430,36 @@ export function io_base(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
     // stdin open and empty by design (fz_fd parks on it), so it parks
     IMPORTS.add("Result");
     const rd = "br" + id;
-    DEFS.push("def " + rd + "(e: " + RS + "String>) -> U32:\n  match e:\n    case Done{s}:\n      String::length(s)\n    case Fail{er}:\n      " + String(1 + G.int(64)));
-    return read("IO::get_env(\"FZQ" + id + "\")", RS + "String>", rd);
+    DEFS.push("def " + rd + "(e: " + RS + "String>) -> U32:\n  match e:\n    case Done{s}:\n      String.length(s)\n    case Fail{er}:\n      " + String(1 + G.int(64)));
+    return read("IO.get_env(\"FZQ" + id + "\")", RS + "String>", rd);
   }
   if (shape === "file") {
     IMPORTS.add("Result");
     const rd = "bf" + id;
-    DEFS.push("def " + rd + "(e: " + RS + "String>) -> U32:\n  match e:\n    case Done{s}:\n      String::length(s)\n    case Fail{er}:\n      " + String(1 + G.int(64)));
+    DEFS.push("def " + rd + "(e: " + RS + "String>) -> U32:\n  match e:\n    case Done{s}:\n      String.length(s)\n    case Fail{er}:\n      " + String(1 + G.int(64)));
     const txt = "fz".repeat(1 + G.int(5));
     const fn = "fzf" + id + ".txt";
     return {
-      s: "IO::bind<" + RS + "Unit>," + g + ">(IO::write_text(\"" + fn + "\", \"" + txt + "\"), w" + id + " => IO::bind<" + RS + "String>," + g + ">(IO::read_text(\"" + fn + "\"), r" + id + " => IO::bind<U32," + g + ">(IO::pure<U32>(" + rd + "(r" + id + ")), " + x + " => " + rest.s + ")))",
+      s: "IO.bind<" + RS + "Unit>," + g + ">(IO.write_text(\"" + fn + "\", \"" + txt + "\"), w" + id + " => IO.bind<" + RS + "String>," + g + ">(IO.read_text(\"" + fn + "\"), r" + id + " => IO.bind<U32," + g + ">(IO.pure<U32>(" + rd + "(r" + id + ")), " + x + " => " + rest.s + ")))",
       out: rest.out,
     };
   }
   if (shape === "argv") {
     IMPORTS.add("List");
     const rd = "ba" + id;
-    DEFS.push("def " + rd + "(xs: List<String>) -> U32:\n  match xs:\n    case Cons{h, t}:\n      (1 + " + rd + "(t))\n    case Nil{}:\n      0");
-    return read("IO::args()", "List<String>", rd);
+    DEFS.push("def " + rd + "(xs: List(String)) -> U32:\n  match xs:\n    case List.Cons{h, t}:\n      (1 + " + rd + "(t))\n    case List.Nil{}:\n      0");
+    return read("IO.args()", "List<String>", rd);
   }
   if (shape === "clock") {
-    return word(G.chance(0.5) ? "IO::now()" : "IO::now_ms()", "U32");
+    return word(G.chance(0.5) ? "IO.now()" : "IO.now_ms()", "U32");
   }
   if (shape === "rand") {
-    return word("IO::rand_word()", "U32");
+    return word("IO.rand_word()", "U32");
   }
   const u = "bu" + id;
-  const call = shape === "slp" ? "IO::sleep(0)" : "IO::print_err(\"fz" + id + "\")";
+  const call = shape === "slp" ? "IO.sleep(0)" : "IO.print_err(\"fz" + id + "\")";
   return {
-    s: "IO::bind<Unit," + g + ">(" + call + ", " + u + " => IO::bind<U32," + g + ">(IO::pure<U32>(" + String(G.int(1024)) + "), " + x + " => " + rest.s + "))",
+    s: "IO.bind<Unit," + g + ">(" + call + ", " + u + " => IO.bind<U32," + g + ">(IO.pure<U32>(" + String(G.int(1024)) + "), " + x + " => " + rest.s + "))",
     out: rest.out,
   };
 }
@@ -3452,15 +3519,22 @@ export function gen_io_program(seed: bigint): IoProgram {
     IMPORTS.add("String");
   }
   const bye = dies
-    ? "    dz" + String(uid_next()) + " <- IO::die<U32>(" + String(code) + ", \"fzdie\")\n"
+    ? "    dz" + String(uid_next()) + " <- IO.die<U32>(" + String(code) + ", \"fzdie\")\n"
     : "";
   const main = "def main() -> IO<U32>:\n  do IO<U32>:\n    " + value
-    + " <- {" + action.s + " : IO<" + ty_str(yielded) + ">}\n" + tail + bye + "    return 0";
+    + " <- (" + action.s + " : IO<" + ty_str(yielded) + ">)\n" + tail + bye + "    return 0";
   const helps = Object.keys(IO_HELPS).filter((h) => ctx.helps.has(h)).map((h) => IO_HELPS[h].src);
   const order = ["List", "Char", "String", "Pair", "Unit", "Bool", "Empty", "Equal", "Result", "Bytes", "IO", "IO/Chan"];
-  const imps = order.filter((m) => IMPORTS.has(m)).map((m) => "import " + m);
+  const imps = order.filter((m) => IMPORTS.has(m)).map((m) => "import ../bend-base/" + m);
   const parts = [imps.join("\n")].concat(DECLS).concat(helps).concat(DEFS).concat([main]);
-  const src = "# fuzz io seed=" + String(seed) + "\n\n" + parts.filter((p) => p !== "").join("\n\n") + "\n";
+  const raw = "# fuzz io seed=" + String(seed) + "\n\n" + parts.filter((p) => p !== "").join("\n\n") + "\n";
+  // the io templates still carry the pre-2026-08-05 spellings; normalize
+  // them all here: generic/type application to parens, the unit value
+  // and the Result ctor tags to their qualified forms
+  const src = io_parenify(raw)
+    .replace(/(^|[^.A-Za-z0-9_])U\{\}/g, "$1Unit.U{}")
+    .replace(/case Done\{/g, "case Result.Done{")
+    .replace(/case Fail\{/g, "case Result.Fail{");
   return { src, files: ctx.files, out: action.out.join("\n"), feats: Object.keys(FEAT), marks: ctx.marks, code: dies ? code : 0 };
 }
 
@@ -3479,18 +3553,19 @@ type WorkerRes = { id: number; verdict: "ok" | "reject" | "skip" | "crash"; out?
 
 export async function worker_main(): Promise<void> {
   const bend = await import(pathToFileURL(BEND_TS).href);
-  // BendErr : the dynamic import types as any, so name the class once to
-  // get instanceof narrowing back
-  const BendErr = bend.BendError as new () => Error & { err: never };
+  const comp = await import(pathToFileURL(COMP_TS).href);
+  // checker/parser failures are plain { $: "Err" } objects at HEAD (no
+  // error class); anything else thrown is a crash
+  const is_err = (e: unknown): boolean => typeof e === "object" && e !== null && (e as { $?: string }).$ === "Err";
   const err_str = (e: unknown): string => {
     if (typeof e === "string") {
       return e;
     }
-    if (e instanceof BendErr) {
+    if (is_err(e)) {
       try {
-        return bend.err_show(e.err);
+        return bend.err_show(e);
       } catch {
-        return "unshowable checker error: " + e.message;
+        return "unshowable checker error";
       }
     }
     if (e instanceof Error) {
@@ -3498,13 +3573,14 @@ export async function worker_main(): Promise<void> {
     }
     return String(e);
   };
-  const base_read = (id: string, kind: string): string | null => {
-    const p = path.join(ROOT, "bend-base", id + (kind === "Bend" ? ".bend" : ""));
-    if (!fs.existsSync(p)) {
-      return null;
-    }
-    return fs.readFileSync(p, "utf8");
-  };
+  // parse_file is FS-only at HEAD, so each request's sources are written
+  // into a scratch dir INSIDE the checkout -- `../bend-base/X` imports
+  // and bare sibling imports (the module split) both resolve there
+  const scratch = path.join(ROOT, WORK_PREFIX + String(process.pid));
+  fs.mkdirSync(scratch, { recursive: true });
+  process.on("exit", () => {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  });
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   // handle : requests are strictly one-in-flight per worker (the pool
   // dispatches the next only after the reply), so an async handler
@@ -3514,24 +3590,37 @@ export async function worker_main(): Promise<void> {
     const reply = (r: WorkerRes): void => {
       process.stdout.write(JSON.stringify(r) + "\n");
     };
-    const reader = (id: string, kind: string): string | null => {
-      if (id === req.base && kind === "Bend") {
-        return req.src;
-      }
-      return req.files?.[id] ?? base_read(id, kind);
+    for (const f of fs.readdirSync(scratch)) {
+      fs.rmSync(path.join(scratch, f), { force: true });
+    }
+    const main_p = path.join(scratch, req.base.slice(2) + ".bend");
+    fs.writeFileSync(main_p, req.src);
+    for (const [id, src] of Object.entries(req.files ?? {})) {
+      fs.writeFileSync(path.join(scratch, id + ".bend"), src);
+    }
+    // book_compile's reader serves C EFFECT sources only. Effect cids
+    // come out checkout-root-relative (`./bend-base/IO/effs/now.c`,
+    // the import chain anchored at ROOT the way the CLI's CWD is), so
+    // a `.`-prefixed id resolves against ROOT; a split sibling written
+    // into the scratch is the fallback; bare ids sit under bend-base.
+    const cread = (id: string): string | null => {
+      const cands = id.startsWith(".")
+        ? [path.join(ROOT, id), path.join(scratch, id)]
+        : [path.join(ROOT, "bend-base", id)];
+      const at = cands.find((p) => fs.existsSync(p));
+      return at === undefined ? null : fs.readFileSync(at, "utf8");
     };
-    const read = async (id: string): Promise<string | null> => reader(id, "Bend");
     // book_check elaborates IN PLACE, and elaboration carries meaning
     // (truth bridges), so the CHECKED book is both what normalizes and
     // what book_compile consumes -- exactly the CLI's path
     let book;
     try {
-      book = await bend.parse_book(req.base, read);
+      book = bend.parse_file(main_p);
       bend.book_check(book, true);
     } catch (e) {
       if (e instanceof RangeError) {
         reply({ id: req.id, verdict: "skip", stage: "check-stack-overflow", err: err_str(e) });
-      } else if (e instanceof bend.BendError) {
+      } else if (is_err(e)) {
         reply({ id: req.id, verdict: "reject", err: err_str(e) });
       } else {
         reply({ id: req.id, verdict: "crash", stage: "check", err: err_str(e) });
@@ -3540,7 +3629,7 @@ export async function worker_main(): Promise<void> {
     }
     if (req.mode === "compile") {
       try {
-        const csrc = bend.book_compile(book, req.base.slice(2), req.src, reader);
+        const csrc = comp.book_compile(book, req.base.slice(2), req.src, cread);
         reply({ id: req.id, verdict: "ok", csrc });
       } catch (e) {
         reply({ id: req.id, verdict: "crash", stage: "compile", err: err_str(e) });
@@ -3570,7 +3659,7 @@ export async function worker_main(): Promise<void> {
     }
     let csrc: string;
     try {
-      csrc = bend.book_compile(book, req.base.slice(2), req.src, reader);
+      csrc = comp.book_compile(book, req.base.slice(2), req.src, cread);
     } catch (e) {
       reply({ id: req.id, verdict: "crash", stage: "comp", err: err_str(e) });
       return;
@@ -4249,6 +4338,22 @@ export async function fuzz_run(): Promise<void> {
   }
   fs.mkdirSync(FINDINGS, { recursive: true });
   fs.writeFileSync(path.join(FINDINGS, ".gitignore"), "*\n!.gitignore\n");
+  // main OWNS the workers' import-scratch lifecycle: clear every
+  // ROOT/.fz-w* (this run's and any SIGKILL leak from a prior run) at
+  // startup and on every exit path, since a killed worker cannot clean
+  // its own dir
+  const clean_work = (): void => {
+    for (const e of fs.readdirSync(ROOT)) {
+      if (e.startsWith(WORK_PREFIX)) {
+        fs.rmSync(path.join(ROOT, e), { recursive: true, force: true });
+      }
+    }
+  };
+  clean_work();
+  process.on("exit", clean_work);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => { clean_work(); process.exit(1); });
+  }
   TMP = fs.mkdtempSync(path.join(os.tmpdir(), "bend-fuzz-"));
   pool = new Pool(Number(cli_opt("--pool", String(Math.min(JOBS * (BATCH > 1 ? 2 : 1), BATCH > 1 ? 10 : 6)))));
   const smoke = WITH_IO
