@@ -476,6 +476,7 @@ class Gen {
 let MIN_PARENS = false;
 
 const PREC: Record<string, number> = {
+  "<>": 1,
   "||": 2, "&&": 3,
   "==": 4, "!=": 4,
   "<=": 5, ">=": 5, "<": 5, ">": 5,
@@ -1208,7 +1209,7 @@ export function syn(goal: T, env: V[], fuel: number): E {
         [is_str ? 40 : 0, () => {
           IMPORTS.add("String");
           if (G.chance(0.25)) {
-            return e_atom("'" + str_char() + "' <> " + str_lit(size_pick(1 + G.int(6), 2000)));
+            return e_bin(e_atom("'" + str_char() + "'"), "<>", e_atom(str_lit(size_pick(1 + G.int(6), 2000))));
           }
           return e_atom(str_lit(size_pick(G.int(9), 2000)));
         }],
@@ -3866,8 +3867,14 @@ export function save_file(sub: string, seed: bigint, header: string[], src: stri
   const dir = sub === "" ? FINDINGS : path.join(FINDINGS, sub);
   fs.mkdirSync(dir, { recursive: true });
   const f = path.join(dir, "seed-" + String(seed) + ".bend");
+  // the emitted `../bend-base/X` imports resolve from the worker scratch
+  // (ROOT/.fz-w<pid>), not from here -- repoint them at ROOT/bend-base
+  // relative to the save dir so the saved program checks in place. Any
+  // sibling-module imports (multi-module seeds) still need the repro command.
+  const base = path.relative(dir, path.join(ROOT, "bend-base")) || ".";
+  const prog = src.replaceAll("import ../bend-base/", "import " + base + "/");
   const head = header.map((l) => "# " + l.replaceAll("\n", "\n# ")).join("\n");
-  fs.writeFileSync(f, head + "\n# found=" + new Date().toISOString() + "\n\n" + src);
+  fs.writeFileSync(f, head + "\n# found=" + new Date().toISOString() + "\n\n" + prog);
   return f;
 }
 
