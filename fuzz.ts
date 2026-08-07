@@ -10,10 +10,15 @@
 // (timeouts, stack overflows) are persisted but not failures.
 //
 //   bun fuzz.ts [count] [--seed N] [--jobs N] [--threads N] [--opt N]
-//     [--batch N] [--pool N] [--metal] [--io] [--no-meta] [--check-only]
-//     [--smoke] [--loop] [--keep] [--profile]
+//     [--batch N] [--pool N] [--metal] [--io] [--io-pct N] [--metal-pct N]
+//     [--no-meta] [--check-only] [--smoke] [--loop] [--keep] [--profile]
 //     [--dump] [--dump-min] [--dump-raw] [-h|--help]
 //   (`bun fuzz.ts --help` prints the annotated flag reference)
+//   MIXED runs: --io-pct / --metal-pct blend a single run -- e.g.
+//   `--io-pct 15 --metal-pct 5` is mostly pure with a bit of each; the type and
+//   Metal leg are rolled PER BATCH (homogeneous, so IO and pure never merge)
+//   off the batch's first seed, so a mixed run reproduces. --io / --metal are
+//   the 100% cases.
 //
 // Everything folds into one U32 scalar because that is the only value shape
 // all three runtimes print identically. Every generated sub-value is folded
@@ -287,9 +292,17 @@
 // flat 112-179ms from N=4 to N=100, so bigger batches now win on the ~110ms
 // per-binary first-exec they amortise. Re-measured end to end over 480
 // programs: 21.0 / 22.4 / 21.8 / 22.1 / 22.1 per second at N = 8/16/24/32/48
-// -- flat past 16, so 16 is the peak and a safe middle. --io stays unbatched: side effects, per-seed process markers and
-// exit codes do not merge. --profile reports the phase clock behind all of
-// this; note wall-clock measurements here swing ~2x with background load.
+// -- flat past 16, so 16 is the peak and a safe middle. --io batches too
+// (default 8, test_io_batch): several die-free members run in order by one
+// do-driver, so the ~72%-of-IO-time clang is paid once per batch instead of
+// per seed (~4.7 -> ~15/s). The output oracle is the members' generated
+// stdout concatenated -- safe because every losing race/timeout branch is
+// silent, so sequencing cannot interleave -- and a leaked process is caught
+// by the batch's unioned orphan sweep. Die-witness members (IO.die ends the
+// whole process, so at most one could ride a batch and only last) are
+// diverted to the solo path instead. IO batches past ~16 regress (the merged
+// program's own compile grows). --profile reports the phase clock behind all
+// of this; note wall-clock measurements here swing ~2x with background load.
 //
 // Findings land in findings/seed-N.bend next to this file (program +
 // verdict header), resource skips in findings/skipped/.
@@ -337,17 +350,25 @@ export const cli_opt = (s: string, d: string): string => {
   const i = argv.indexOf(s);
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : d;
 };
-const VALUED_FLAGS = ["--seed", "--jobs", "--threads", "--opt", "--batch", "--pool"];
+const VALUED_FLAGS = ["--seed", "--jobs", "--threads", "--opt", "--batch", "--pool", "--io-pct", "--metal-pct"];
 const COUNT = Number(argv.find((a, i) => /^\d+$/.test(a) && !VALUED_FLAGS.includes(argv[i - 1] ?? "")) ?? "100");
 const BASE_SEED = BigInt(cli_opt("--seed", String(Math.floor(Math.random() * 2 ** 48))));
 const JOBS = Number(cli_opt("--jobs", String(Math.max(1, Math.min(8, os.cpus().length - 2)))));
 const THREADS = Number(cli_opt("--threads", "1"));
-const WITH_METAL = cli_flag("--metal");
-const WITH_IO = cli_flag("--io");
+// IO_PCT / METAL_PCT : the mix. --io / --metal are the 100% cases; --io-pct N /
+// --metal-pct N blend (e.g. --io-pct 15 --metal-pct 5 = mostly pure, a bit of
+// each). The two rolls are per-batch and independent, so pure/pure+metal/io/
+// io+metal batches all occur. WITH_IO / WITH_METAL stay = the full modes, so
+// smoke seeds, --dump and the pure/io tooling paths are unchanged.
+const IO_PCT = cli_flag("--io") ? 100 : Math.max(0, Math.min(100, Number(cli_opt("--io-pct", "0"))));
+const METAL_PCT = cli_flag("--metal") ? 100 : Math.max(0, Math.min(100, Number(cli_opt("--metal-pct", "0"))));
+const WITH_METAL = METAL_PCT === 100;
+const WITH_IO = IO_PCT === 100;
+const MIXED = (IO_PCT > 0 && IO_PCT < 100) || (METAL_PCT > 0 && METAL_PCT < 100);
 const NO_META = cli_flag("--no-meta");
 const KEEP = cli_flag("--keep");
 const PROFILE = cli_flag("--profile");
-const BATCH = Math.max(1, Math.min(64, Number(cli_opt("--batch", WITH_IO ? "1" : "16"))));
+const BATCH = Math.max(1, Math.min(64, Number(cli_opt("--batch", "16"))));
 const LOOP = cli_flag("--loop");
 const SMOKE = cli_flag("--smoke");
 const CHECK_ONLY = cli_flag("--check-only");
@@ -366,11 +387,13 @@ export function print_help(): void {
     "  --seed N       base seed (default: random)",
     "  --jobs N       parallel worker jobs (default: min(8, cpus-2))",
     "  --threads N    NUM_THREADS for the compiled/Metal runtime (default 1)",
-    "  --opt N        clang optimization level -O<N> (default 3)",
-    "  --batch N      seeds per worker batch, 1..64 (default 16; 1 with --io)",
+    "  --opt N        clang optimization level -O<N> (default 2)",
+    "  --batch N      seeds per worker batch, 1..64 (default 16; 8 with --io)",
     "  --pool N       worker pool size (default: derived from jobs/batch)",
-    "  --metal        also run the Metal (GPU) backend",
-    "  --io           IO-program mode: effects, unbatched, no metamorphic leg",
+    "  --metal        run the Metal (GPU) backend on every batch (= --metal-pct 100)",
+    "  --io           IO-program mode on every batch (= --io-pct 100; batched, no metamorphic)",
+    "  --io-pct N     mix: percent of batches that are IO programs (default 0)",
+    "  --metal-pct N  mix: percent of batches that also run the Metal leg (default 0)",
     "  --no-meta      disable the min-parens metamorphic sibling",
     "  --check-only   only typecheck; skip running the backends",
     "  --smoke        run the fixed smoke-seed set and assert feature coverage",
@@ -451,6 +474,13 @@ const M64 = (1n << 64n) - 1n;
 
 export function rng_step(x: bigint): bigint {
   return (x + 0x9e3779b97f4a7c15n) & M64;
+}
+
+// batch_roll : a deterministic 0-99 draw for a per-batch mix decision, keyed on
+// the batch's first seed and a salt (so the IO and Metal rolls are independent
+// and a mixed run reproduces exactly under the same --seed)
+export function batch_roll(seed: bigint, salt: bigint): number {
+  return Number(rng_mix64(seed ^ salt) % 100n);
 }
 
 export function rng_mix64(x: bigint): bigint {
@@ -1040,7 +1070,7 @@ export function num_gen_u32(env: V[], fuel: number): E {
       return e_bin(num_gen_f32(env, fuel - 1), op, num_gen_f32(env, fuel - 1));
     }],
     [fuel >= 2 ? 5 : 0, () => call_helper(env, fuel)],
-    [fuel >= 2 ? 4 : 0, () => call_hof(env, fuel)],
+    [fuel >= 2 ? 4 : 0, () => syn_apply(U32C, env, fuel) ?? num_lit_u32()],
     [fuel >= 2 ? 4 : 0, () => syn_call_unify(U32C, env, fuel) ?? num_lit_u32()],
     [fuel >= 2 ? 3 : 0, () => {
       const t = syn_ty(1, true);
@@ -1188,6 +1218,14 @@ export function syn(goal: T, env: V[], fuel: number): E {
   if (fuel >= 2 && syn_form_ok(goal) && G.chance(0.12)) {
     return syn_form(goal, env, fuel);
   }
+  // the general higher-order production: reach ANY goal by applying a function
+  // to a synthesized prefix (partial applications produce closures)
+  if (fuel >= 2 && goal.k !== "io" && goal.k !== "eql" && G.chance(0.08)) {
+    const a = syn_apply(goal, env, fuel);
+    if (a !== null) {
+      return a;
+    }
+  }
   const direct = env.filter((v) => v.q !== "dead" && ty_eq(v.ty, goal));
   const var_w = direct.length > 0 ? 30 : 0;
   const uni_w = fuel >= 1 ? 8 : 0;
@@ -1311,6 +1349,40 @@ export function syn(goal: T, env: V[], fuel: number): E {
   }
 }
 
+// app_arg_ty : an argument type for syn_apply -- biased to the numeric bases
+// (always inhabited, cheap) with a tail of richer synthesized types
+export function app_arg_ty(fuel: number): T {
+  return G.chance(0.7) ? G.pick([U32C, F32C]) : syn_ty(Math.min(fuel, 1), false);
+}
+
+// syn_apply : fill a hole of type `goal` by APPLYING a function value to a
+// synthesized argument prefix -- a value of type A1 -> .. -> Ak -> goal applied
+// to a1..ak yields `goal`. The general higher-order production: the function is
+// itself synthesized (an in-scope var, a lambda, a def call, another
+// application), and because `goal` may itself be a function type the prefix need
+// not saturate it -- a short prefix leaves the tail un-applied and PRODUCES a
+// new closure. Subsumes call_hof (apply a passed function) and generalizes clo
+// (partial application). Returns null when a piece has no inhabitant.
+export function syn_apply(goal: T, env: V[], fuel: number): E | null {
+  const k = 1 + G.int(Math.max(1, Math.min(3, fuel)));
+  const doms: T[] = [];
+  for (let i = 0; i < k; i++) {
+    doms.push(app_arg_ty(fuel));
+  }
+  let ft: T = goal;
+  for (let i = k - 1; i >= 0; i--) {
+    ft = { k: "fun", dom: doms[i], cod: ft };
+  }
+  try {
+    const f = syn(ft, env, Math.max(0, fuel - 1));
+    const args = doms.map((d) => "(" + e_at(syn(d, env, Math.max(0, fuel - 1))) + ")");
+    feature_add("hof");
+    return e_atom("(" + f.s + ")" + args.join(""));
+  } catch {
+    return null;
+  }
+}
+
 export function syn_def_arg(d: DefR, i: number, t: T, env: V[], fuel: number): string {
   const e = syn(t, env, fuel);
   const mod = d.mask?.[i];
@@ -1361,9 +1433,23 @@ export function syn_mint_def(goal: T, env: V[]): E | null {
     feature_add("erased");
     ps.splice(er, 0, syn_plain_ty(1));
   }
+  // comp : ~ (Comp) params -- specialized per call, erased at runtime. This is
+  // syn_comp generalized: any param may carry ~ (a ~ argument cannot be MATCHED
+  // on, but the expression body never inline-matches an env var, so every param
+  // is safe). Function-typed ~ params get APPLIED by syn_apply in the body --
+  // the old call_hof/syn_comp shape now falls out of the general mint.
+  const comp = new Set<number>();
+  for (let i = 0; i < ps.length; i++) {
+    if (i !== er && G.chance(0.1)) {
+      comp.add(i);
+    }
+  }
+  if (comp.size > 0) {
+    feature_goal("comp", goal);
+  }
   const penv = ps.map((p, i) => v_many("p" + String(i), p)).filter((_, i) => i !== er);
   const body = syn(goal, penv, 2);
-  const params = ps.map((p, i) => i === er ? "-p" + String(i) + ": " + ty_str(p) : ty_bind("p" + String(i), p));
+  const params = ps.map((p, i) => i === er ? "-p" + String(i) + ": " + ty_str(p) : (comp.has(i) ? "~" : "") + ty_bind("p" + String(i), p));
   DEFS.push("def " + name + "(" + params.join(", ") + ") -> " + ty_str(goal) + ":\n  " + e_at(body));
   DEFR.push({ name, tps: [], ps, ret: goal, er: er >= 0 ? er : undefined });
   const args = ps.map((p) => e_at(syn(p, env, 1)));
@@ -1381,7 +1467,6 @@ export function syn_form_ok(goal: T): boolean {
 export function syn_form(goal: T, env: V[], fuel: number): E {
   return G.wpick<() => E>([
     [20, () => syn_if(goal, env, fuel)],
-    [18, () => syn_comp(goal, env, fuel)],
     [18, () => syn_open(goal, env, fuel)],
     [16, () => syn_assert(goal, env, fuel)],
     [ty_data(goal) ? 16 : 0, () => syn_dep(goal, env, fuel)],
@@ -1391,54 +1476,27 @@ export function syn_form(goal: T, env: V[], fuel: number): E {
   ])();
 }
 
+// mint_reg : mint `def <prefix><uid>(<params>) -> <goal>: <body>`, register it in
+// DEFR, and return the saturating call -- the shared spine the statement-form
+// minters (syn_if / syn_open / match_call_def) build their bodies on. The forms
+// stay distinct (each is a statement that needs its own def body) but no longer
+// each re-spell the mint+register+call.
+export function mint_reg(prefix: string, params: string, goal: T, body: string, ps: T[], args: string): E {
+  const name = prefix + String(uid_next());
+  DEFS.push("def " + name + "(" + params + ") -> " + ty_str(goal) + ":\n" + body);
+  DEFR.push({ name, tps: [], ps, ret: goal });
+  return e_defcall(name, name + "(" + args + ")");
+}
+
 export function syn_if(goal: T, env: V[], fuel: number): E {
   feature_goal("if", goal);
-  const name = "if" + String(uid_next());
   const a = 1 + G.int(8);
   const b = a + 1 + G.int(8);
   const branch = (): string => e_at(syn(goal, [v_many("n", U32C)], Math.max(0, fuel - 1)));
-  DEFS.push("def " + name + "(n: U32) -> " + ty_str(goal) + ":\n  if n < " + String(a) + ":\n    " + branch()
+  const body = "  if n < " + String(a) + ":\n    " + branch()
     + "\n  elif n < " + String(b) + ":\n    " + branch()
-    + "\n  else:\n    " + branch());
-  DEFR.push({ name, tps: [], ps: [U32C], ret: goal });
-  return e_defcall(name, name + "(" + e_at(num_gen_u32(env, 1)) + ")");
-}
-
-export function syn_comp(goal: T, env: V[], fuel: number): E {
-  feature_goal("comp", goal);
-  const name = "cp" + String(uid_next());
-  const dom = ty_data(goal) && G.chance(0.5) ? goal : syn_plain_ty(1);
-  const z = "z" + String(uid_next());
-  const captures = env.filter((v) => v.q === "many");
-  const words = captures.filter((v) => v.ty.k === "u32");
-  const arg = syn(dom, env, Math.max(0, fuel - 1));
-  const kind = G.wpick<string>([[60, "one"], [25, "two"], [words.length > 0 ? 15 : 0, "era"]]);
-  if (kind === "two") {
-    feature_add("comp2");
-    const mid = syn_plain_ty(1);
-    DEFS.push("def " + name + "(~f: " + ty_str(dom) + " -> " + ty_str(mid) + ", ~g: " + ty_str(mid) + " -> " + ty_str(goal) + ", x: " + ty_str(dom) + ") -> " + ty_str(goal) + ":\n  g(f(x))");
-    const z2 = "z" + String(uid_next());
-    const bodyF = ty_eq(dom, mid) ? e_atom(z) : syn(mid, captures.concat([v_many(z, dom)]), Math.max(0, fuel - 1));
-    const bodyG = ty_eq(mid, goal) ? e_atom(z2) : syn(goal, captures.concat([v_many(z2, mid)]), Math.max(0, fuel - 1));
-    return e_atom(name + "(" + z + " => " + e_at(bodyF) + ", " + z2 + " => " + e_at(bodyG) + ", " + e_at(arg) + ")");
-  }
-  DEFS.push("def " + name + "(~f: " + ty_str(dom) + " -> " + ty_str(goal) + ", x: " + ty_str(dom) + ") -> " + ty_str(goal) + ":\n  f(x)");
-  if (kind === "era") {
-    // compera : the capture reaches the template body ONLY through an
-    // erased param (the reg/357 class: argument and parameter must
-    // erase together or the saturated call loses an argument)
-    feature_add("compera");
-    const sink = "ce" + String(uid_next());
-    DEFS.push("def " + sink + "(-e: U32, " + ty_bind("y", goal) + ") -> " + ty_str(goal) + ":\n  y");
-    const w = G.pick(words).name;
-    const cenv = captures.filter((v) => v.name !== w);
-    const inner = ty_eq(dom, goal) ? e_atom(z) : syn(goal, cenv.concat([v_many(z, dom)]), Math.max(0, fuel - 1));
-    return e_atom(name + "(" + z + " => " + sink + "(" + w + ", " + e_at(inner) + "), " + e_at(arg) + ")");
-  }
-  const body = ty_eq(dom, goal)
-    ? e_atom(z)
-    : syn(goal, captures.concat([v_many(z, dom)]), Math.max(0, fuel - 1));
-  return e_atom(name + "(" + z + " => " + e_at(body) + ", " + e_at(arg) + ")");
+    + "\n  else:\n    " + branch();
+  return mint_reg("if", "n: U32", goal, body, [U32C], e_at(num_gen_u32(env, 1)));
 }
 
 export function syn_open(goal: T, env: V[], fuel: number): E {
@@ -1447,17 +1505,13 @@ export function syn_open(goal: T, env: V[], fuel: number): E {
   const snd = syn_plain_ty(1);
   const pair = need_pair(fst, snd);
   const unit = need_unit();
-  const name = "op" + String(uid_next());
   const a = "a" + String(uid_next());
   const b = "b" + String(uid_next());
   const penv = [v_many(a, fst), v_many(b, snd)];
-  const body = ty_eq(fst, goal)
-    ? e_atom(a)
-    : syn(goal, penv, Math.max(0, fuel - 1));
-  DEFS.push("def " + name + "(p: " + ty_str(pair) + ", u: Unit) -> " + ty_str(goal) + ":\n  ("
-    + a + ", " + b + ") = p\n  match u:\n    case ():\n      " + e_at(body));
-  DEFR.push({ name, tps: [], ps: [pair, unit], ret: goal });
-  return e_defcall(name, name + "(" + e_at(syn(pair, env, 1)) + ", " + e_at(syn(unit, env, 1)) + ")");
+  const inner = ty_eq(fst, goal) ? e_atom(a) : syn(goal, penv, Math.max(0, fuel - 1));
+  const body = "  (" + a + ", " + b + ") = p\n  match u:\n    case ():\n      " + e_at(inner);
+  return mint_reg("op", "p: " + ty_str(pair) + ", u: Unit", goal, body, [pair, unit],
+    e_at(syn(pair, env, 1)) + ", " + e_at(syn(unit, env, 1)));
 }
 
 export function syn_assert(goal: T, env: V[], fuel: number): E {
@@ -1987,16 +2041,6 @@ export function call_helper(env: V[], fuel: number): E {
   return e_defcall(name, name + "(" + (K === 1 ? [iters].concat(args) : args.concat([iters])).join(", ") + ")");
 }
 
-export function call_hof(env: V[], fuel: number): E {
-  feature_add("hof");
-  const name = "hf" + String(uid_next());
-  const henv: V[] = [v_many("x", U32C)];
-  const rParts = [e_atom("f(" + e_at(num_gen_u32(henv, 1)) + ")"), num_gen_u32(henv, 1)];
-  DEFS.push("def " + name + "(f: (U32 -> U32), x: U32) -> U32:\n  " + e_at(num_combine(rParts)));
-  const lam = syn({ k: "fun", dom: U32C, cod: U32C }, env, Math.min(fuel - 1, 1));
-  return e_defcall(name, name + "(" + e_at(lam) + ", " + e_at(num_gen_u32(env, Math.min(fuel - 1, 1))) + ")");
-}
-
 // Generic
 // -------
 // erased Type params through the <> sugar; params and return mention the
@@ -2172,12 +2216,8 @@ export function match_body(env: V[], depth: number, ind: number): string {
 
 export function match_call_def(env: V[], fuel: number): E {
   feature_add("match");
-  const name = "mt" + String(uid_next());
-  const henv: V[] = [v_many("s", U32C)];
-  const body = match_body(henv, 1 + G.int(2), 2);
-  DEFS.push("def " + name + "(s: U32) -> U32:\n" + body);
-  DEFR.push({ name, tps: [], ps: [U32C], ret: U32C });
-  return e_defcall(name, name + "(" + e_at(num_gen_u32(env, Math.min(fuel, 1))) + ")");
+  const body = match_body([v_many("s", U32C)], 1 + G.int(2), 2);
+  return mint_reg("mt", "s: U32", U32C, body, [U32C], e_at(num_gen_u32(env, Math.min(fuel, 1))));
 }
 
 // String
@@ -2572,7 +2612,7 @@ export function let_call(env: V[]): Line {
   const e = G.wpick<() => E>([
     [24, () => match_call_def(env, 1)],
     [18, () => call_helper(env, 2)],
-    [14, () => call_hof(env, 1)],
+    [14, () => syn_apply(U32C, env, 2) ?? num_lit_u32()],
     [30, () => syn_form(U32C, env, 3)],
     [12, () => string_call_def(env)],
     [8, () => string_call_char_def(env)],
@@ -3528,8 +3568,26 @@ export function io_syn(goal: T, env: V[], fuel: number, ctx: IoCtx): IoTerm {
 // Gen
 // ---
 
-export function gen_io_program(seed: bigint): IoProgram {
-  gen_reset(seed, false);
+// IO_ORDER : import modules in a stable emission order (shared by solo + batch)
+const IO_ORDER = ["List", "Char", "String", "Pair", "Unit", "Bool", "Empty", "Equal", "Result", "Bytes", "IO", "IO/Chan"];
+
+type IoMember = {
+  seed: bigint; imps: string[]; decls: string[]; helps: string[]; defs: string[];
+  value: string; action: string; yielded: string; outLines: string[];
+  marks: string[]; files: Record<string, string>; dies: boolean; code: number; dz: string; feats: string[];
+};
+
+// gen_io_member : one IO program's pieces, position-INDEPENDENT so a batched
+// member and its solo re-run (attribution / straggler) draw identically at
+// their own uid base -- a die-witness member is diverted to the solo path
+// rather than special-cased by batch position, keeping saved findings
+// reproducible under a bare `--seed N`. The leak-probe tail is gone (the Op
+// ruling: only hand-written Op rows compile; a leaked PROCESS is still caught
+// by the orphan sweep). Die is the one Op that reclaims NOTHING on the way
+// out, so whatever the seed left running rides io_run's exit teardown -- the
+// exit code is the assertion.
+export function gen_io_member(seed: bigint, base = 0): IoMember {
+  gen_reset(seed, false, base);
   feature_add("io");
   IMPORTS.add("IO");
   const nadts = G.int(3);
@@ -3541,40 +3599,67 @@ export function gen_io_program(seed: bigint): IoProgram {
   const ctx: IoCtx = { key, files: {}, helps: new Set(), marks: [], alive: false };
   const action = io_syn(yielded, [], 3, ctx);
   const value = "io" + String(uid_next());
-  // The in-process LEAK PROBE (timer-heap depth + waitpid(WNOHANG) as a
-  // last effect) died with the Op ruling: it was a minted C effect, and
-  // only hand-written Op rows compile. A leaked timer entry is invisible
-  // now; a leaked PROCESS is still caught by the orphan sweep outside
-  // the binary.
-  const tail = "";
-  // dies : Die is the one Op that reclaims NOTHING on its way out -- no cancel
-  // walk at all -- so whatever the seed left running rides entirely on
-  // io_run's exit teardown. Paired with a live spawn it is the only
-  // generated witness for that path; the exit code is the assertion.
   const dies = G.chance(0.15);
   const code = 1 + G.int(200);
+  const dz = dies ? "dz" + String(uid_next()) : "";
   if (dies) {
     feature_add("dieio");
     IMPORTS.add("String");
   }
-  const bye = dies
-    ? "    dz" + String(uid_next()) + " <- IO.die<U32>(" + String(code) + ", \"fzdie\")\n"
-    : "";
-  const main = "def main() -> IO<U32>:\n  do IO<U32>:\n    " + value
-    + " <- (" + action.s + " : IO<" + ty_str(yielded) + ">)\n" + tail + bye + "    return 0";
-  const helps = Object.keys(IO_HELPS).filter((h) => ctx.helps.has(h)).map((h) => IO_HELPS[h].src);
-  const order = ["List", "Char", "String", "Pair", "Unit", "Bool", "Empty", "Equal", "Result", "Bytes", "IO", "IO/Chan"];
-  const imps = order.filter((m) => IMPORTS.has(m)).map((m) => "import ../bend-base/" + m);
-  const parts = [imps.join("\n")].concat(DECLS).concat(helps).concat(DEFS).concat([main]);
-  const raw = "# fuzz io seed=" + String(seed) + "\n\n" + parts.filter((p) => p !== "").join("\n\n") + "\n";
-  // the io templates still carry the pre-2026-08-05 spellings; normalize
-  // them all here: generic/type application to parens, the unit value
-  // and the Result ctor tags to their qualified forms
+  return {
+    seed, imps: IO_ORDER.filter((m) => IMPORTS.has(m)), decls: DECLS.slice(),
+    helps: Object.keys(IO_HELPS).filter((h) => ctx.helps.has(h)), defs: DEFS.slice(),
+    value, action: action.s, yielded: ty_str(yielded), outLines: action.out,
+    marks: ctx.marks, files: ctx.files, dies, code, dz, feats: Object.keys(FEAT),
+  };
+}
+
+// io_member_def : a member's action as a named IO<U32> def; the die tail (an
+// IO.die that never returns) rides only the solo main -- a batch diverts every
+// die-witness, so bm<k> never dies and the driver's `return 0` is always reached
+export function io_member_def(name: string, m: IoMember, withDie: boolean): string {
+  const bye = withDie && m.dies ? "    " + m.dz + " <- IO.die<U32>(" + String(m.code) + ", \"fzdie\")\n" : "";
+  return "def " + name + "() -> IO<U32>:\n  do IO<U32>:\n    " + m.value
+    + " <- (" + m.action + " : IO<" + m.yielded + ">)\n" + bye + "    return 0";
+}
+
+// io_assemble : the members' shared prelude (imports unioned in IO_ORDER, helps
+// deduped by their FIXED name, decls/defs concatenated -- disjoint at their uid
+// bases) plus the given tail defs, normalized to the post-2026-08-05 spellings
+export function io_assemble(head: string, members: IoMember[], tail: string[], out: string, code: number): IoProgram {
+  const has = new Set(members.flatMap((m) => m.imps));
+  const imps = IO_ORDER.filter((m) => has.has(m)).map((m) => "import ../bend-base/" + m);
+  const helps = [...new Set(members.flatMap((m) => m.helps))].map((h) => IO_HELPS[h].src);
+  const parts = [imps.join("\n")]
+    .concat(members.flatMap((m) => m.decls))
+    .concat(helps)
+    .concat(members.flatMap((m) => m.defs))
+    .concat(tail);
+  const raw = head + "\n\n" + parts.filter((p) => p !== "").join("\n\n") + "\n";
   const src = io_parenify(raw)
     .replace(/(^|[^.A-Za-z0-9_])U\{\}/g, "$1Unit.U{}")
     .replace(/case Done\{/g, "case Result.Done{")
     .replace(/case Fail\{/g, "case Result.Fail{");
-  return { src, files: ctx.files, out: action.out.join("\n"), feats: Object.keys(FEAT), marks: ctx.marks, code: dies ? code : 0 };
+  return {
+    src, files: Object.assign({}, ...members.map((m) => m.files)), out,
+    feats: [...new Set(members.flatMap((m) => m.feats))], marks: members.flatMap((m) => m.marks), code,
+  };
+}
+
+export function gen_io_program(seed: bigint): IoProgram {
+  const m = gen_io_member(seed, 0);
+  return io_assemble("# fuzz io seed=" + String(seed), [m], [io_member_def("main", m, true)],
+    m.outLines.join("\n"), m.dies ? m.code : 0);
+}
+
+// io_batch_src : several DIE-FREE members as bm<k>, run in order by a do-driver;
+// the batch's stdout is the members' outputs concatenated, exit 0
+export function io_batch_src(members: IoMember[]): IoProgram {
+  const defs = members.map((m, k) => io_member_def("bm" + String(k), m, false));
+  const binds = members.map((_, k) => "    r" + String(k) + " <- bm" + String(k) + "()").join("\n");
+  const driver = "def main() -> IO<U32>:\n  do IO<U32>:\n" + binds + "\n    return 0";
+  return io_assemble("# fuzz io batch of " + String(members.length), members, defs.concat([driver]),
+    members.flatMap((m) => m.outLines).join("\n"), 0);
 }
 
 // Worker
@@ -3843,7 +3928,7 @@ export function leg_exec(cmd: string, args: string[], cwd: string, timeout: numb
   });
 }
 
-const OPT = "-O" + cli_opt("--opt", "3");
+const OPT = "-O" + cli_opt("--opt", "2");
 const CC_FLAGS = [OPT, "-w", "-fno-slp-vectorize", "-DPAR_BACKEND=0", "-DNUM_THREADS=" + String(THREADS)];
 
 // file_link : the compiler's own `//! link` line (file_flags in bend.ts):
@@ -3916,8 +4001,11 @@ export function save_file(sub: string, seed: bigint, header: string[], src: stri
   return f;
 }
 
-export function save_finding(seed: bigint, kind: string, detail: string[], src: string): string {
-  return save_file("", seed, ["FUZZ FINDING kind=" + kind, "repro: bun " + import.meta.filename + " 1 --seed " + String(seed) + (WITH_METAL ? " --metal" : "") + (WITH_IO ? " --io" : ""), ...detail], src);
+// save_finding : io/metal flag the repro line so a mixed-run finding reproduces
+// under a bare --seed (an IO program needs --io to regenerate, a Metal
+// divergence needs --metal to re-run that leg); they default to the full modes
+export function save_finding(seed: bigint, kind: string, detail: string[], src: string, io = WITH_IO, metal = WITH_METAL): string {
+  return save_file("", seed, ["FUZZ FINDING kind=" + kind, "repro: bun " + import.meta.filename + " 1 --seed " + String(seed) + (metal ? " --metal" : "") + (io ? " --io" : ""), ...detail], src);
 }
 
 export function save_aux(files: Record<string, string>): void {
@@ -4044,13 +4132,13 @@ export function batch_src(parts: GenParts[]): string {
 // Test
 // ----
 
-export async function test_io(seed: bigint): Promise<Verdict> {
+export async function test_io(seed: bigint, metal = WITH_METAL): Promise<Verdict> {
   const prog = phase_sync("gen", () => gen_io_program(seed));
   tally_feats(prog.feats);
   const base = "fzio" + String(seed);
   const w = await phase("worker:compile", () => pool.run(prog.src, "./" + base, "compile", prog.files));
   if (w.verdict === "reject" || w.verdict === "crash") {
-    const f = save_finding(seed, w.verdict === "reject" ? "generator-reject" : "compiler-crash", ["stage=" + (w.stage ?? "check"), w.err ?? ""], prog.src);
+    const f = save_finding(seed, w.verdict === "reject" ? "generator-reject" : "compiler-crash", ["stage=" + (w.stage ?? "check"), w.err ?? ""], prog.src, true);
     save_aux(prog.files);
     console.log("\nFINDING " + w.verdict + " seed=" + String(seed) + "\n  " + (w.err ?? "").split("\n")[0] + "\n  -> " + f);
     return { kind: "fail" };
@@ -4072,7 +4160,7 @@ export async function test_io(seed: bigint): Promise<Verdict> {
     }
     if (c.kind === "fail" || c.out !== prog.out) {
       const why = c.kind === "fail" ? c.why ?? "" : "expected: " + prog.out + "\nobserved: " + c.out;
-      const f = save_finding(seed, c.kind === "fail" ? "io-c-leg" : "io-diverge", [why], prog.src);
+      const f = save_finding(seed, c.kind === "fail" ? "io-c-leg" : "io-diverge", [why], prog.src, true);
       save_aux(prog.files);
       console.log("\nFINDING io seed=" + String(seed) + "\n  " + why.split("\n")[0] + "\n  -> " + f);
       return { kind: "fail" };
@@ -4080,12 +4168,12 @@ export async function test_io(seed: bigint): Promise<Verdict> {
     const orph = phase_sync("pgrep:after", () => io_orphans(prog.marks, before));
     if (orph.length > 0) {
       const why = "processes outlived the program: " + orph.join(", ");
-      const f = save_finding(seed, "io-orphan", [why], prog.src);
+      const f = save_finding(seed, "io-orphan", [why], prog.src, true);
       save_aux(prog.files);
       console.log("\nFINDING io-orphan seed=" + String(seed) + "\n  " + why + "\n  -> " + f);
       return { kind: "fail" };
     }
-    if (WITH_METAL) {
+    if (metal) {
       const m = await leg_metal(dir, base, prog.code);
       if (m.kind === "skip") {
         save_file("skipped", seed, ["SKIPPED reason=" + (m.why ?? "?")], prog.src);
@@ -4093,7 +4181,7 @@ export async function test_io(seed: bigint): Promise<Verdict> {
       }
       if (m.kind === "fail" || m.out !== prog.out) {
         const why = m.kind === "fail" ? m.why ?? "" : "expected: " + prog.out + "\nobserved: " + m.out;
-        const f = save_finding(seed, m.kind === "fail" ? "io-metal-leg" : "io-metal-diverge", [why], prog.src);
+        const f = save_finding(seed, m.kind === "fail" ? "io-metal-leg" : "io-metal-diverge", [why], prog.src, true, true);
         save_aux(prog.files);
         console.log("\nFINDING io-metal seed=" + String(seed) + "\n  " + why.split("\n")[0] + "\n  -> " + f);
         return { kind: "fail" };
@@ -4114,7 +4202,97 @@ export async function test_io(seed: bigint): Promise<Verdict> {
   return { kind: "ok" };
 }
 
-export async function test_batch(seeds: bigint[]): Promise<Verdict[]> {
+// test_io_batch : compile several die-free members as ONE program run by a
+// sequential do-driver, so the expensive clang is paid ONCE for the batch
+// instead of per seed. The oracle is the members' generated outputs
+// concatenated in run order (losing race/timeout branches are silent, so the
+// sequencing cannot interleave stdout); a leaked process is caught by the
+// batch's unioned orphan sweep. Die-witness members are diverted to the solo
+// path (IO.die ends the whole process). On any mismatch the members re-run
+// solo for attribution, at uid base 0 so a saved finding reproduces bare.
+export async function test_io_batch(seeds: bigint[], metal = WITH_METAL): Promise<Verdict[]> {
+  const vs: Verdict[] = seeds.map(() => ({ kind: "ok" }));
+  const members: IoMember[] = [];
+  const at: number[] = [];
+  for (let i = 0; i < seeds.length; i++) {
+    const m = phase_sync("gen", () => gen_io_member(seeds[i], members.length * UID_STRIDE));
+    if (m.dies) {
+      vs[i] = await test_io(seeds[i], metal);
+    } else {
+      tally_feats(m.feats);
+      members.push(m);
+      at.push(i);
+    }
+  }
+  if (members.length < 2) {
+    for (let k = 0; k < members.length; k++) {
+      vs[at[k]] = await test_io(members[k].seed, metal);
+    }
+    return vs;
+  }
+  const prog = io_batch_src(members);
+  const base = "fziob" + String(members[0].seed);
+  const w = await phase("worker:compile", () => pool.run(prog.src, "./" + base, "compile", prog.files));
+  let why: string | null = null;
+  if (w.verdict !== "ok") {
+    why = "merged " + w.verdict + " (" + (w.stage ?? "?") + "): " + (w.err ?? "").split("\n")[0];
+  } else if (!CHECK_ONLY) {
+    const dir = phase_sync("tmpdir", () => fs.mkdtempSync(path.join(TMP, "iob-")));
+    const before = phase_sync("pgrep:before", () => io_marked(prog.marks));
+    try {
+      const c = await leg_c(dir, base, w.csrc ?? "", prog.code);
+      if (c.kind === "fail") {
+        why = c.why ?? "merged io C leg failed";
+      } else if (c.kind === "ok" && c.out !== prog.out) {
+        why = "merged io out mismatch";
+      }
+      if (why === null) {
+        const orph = phase_sync("pgrep:after", () => io_orphans(prog.marks, before));
+        if (orph.length > 0) {
+          why = "processes outlived the batch: " + orph.join(", ");
+        }
+      }
+      if (why === null && metal) {
+        const m = await leg_metal(dir, base, prog.code);
+        if (m.kind === "fail") {
+          why = m.why ?? "merged io Metal leg failed";
+        } else if (m.kind === "ok" && m.out !== prog.out) {
+          why = "merged io Metal out mismatch";
+        }
+      }
+    } finally {
+      phase_sync("pgrep:reap", () => io_orphans(prog.marks, before));
+      phase_sync("rmdir", () => {
+        if (!KEEP) {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+  if (why === null) {
+    return vs;
+  }
+  console.log("\nio batch of " + String(members.length) + " failed, isolating: " + why.split("\n")[0]);
+  let blamed = false;
+  for (let k = 0; k < members.length; k++) {
+    const v = await test_io(members[k].seed, metal);
+    vs[at[k]] = v;
+    if (v.kind === "fail") {
+      blamed = true;
+    }
+  }
+  if (!blamed) {
+    const f = save_finding(members[0].seed, "io-batch-only",
+      ["no member fails alone -- the MERGE or its sequencing is at fault", why,
+        "members: " + members.map((m) => String(m.seed)).join(" ")], prog.src, true, metal);
+    save_aux(prog.files);
+    console.log("FINDING io-batch-only seeds=" + String(members.length) + "\n  " + why.split("\n")[0] + "\n  -> " + f);
+    vs[at[0]] = { kind: "fail" };
+  }
+  return vs;
+}
+
+export async function test_batch(seeds: bigint[], metal = WITH_METAL): Promise<Verdict[]> {
   const collect: { seed: bigint; want: string }[] = [];
   const vs = await Promise.all(seeds.map((sd) => test_one(sd, collect)));
   if (collect.length < 2) {
@@ -4122,7 +4300,7 @@ export async function test_batch(seeds: bigint[]): Promise<Verdict[]> {
     // their own compiled leg so coverage does not silently drop -- the
     // interp legs already passed, so the known answer skips them
     for (const m of collect) {
-      const v = await test_one(m.seed, undefined, m.want);
+      const v = await test_one(m.seed, undefined, m.want, metal);
       vs[seeds.indexOf(m.seed)] = v;
     }
     return vs;
@@ -4146,7 +4324,7 @@ export async function test_batch(seeds: bigint[]): Promise<Verdict[]> {
       }
       // leg_metal : the merged binary carries the Metal leg too -- without this the
       // batch silently drops it and --metal becomes a no-op
-      if (why === null && WITH_METAL) {
+      if (why === null && metal) {
         const mm = await leg_metal(dir, base);
         if (mm.kind === "fail") {
           why = mm.why ?? "merged Metal leg failed";
@@ -4168,7 +4346,7 @@ export async function test_batch(seeds: bigint[]): Promise<Verdict[]> {
   console.log("\nbatch of " + String(collect.length) + " failed, isolating: " + why.split("\n")[0]);
   let blamed = false;
   for (const m of collect) {
-    const v = await test_one(m.seed);
+    const v = await test_one(m.seed, undefined, undefined, metal);
     vs[seeds.indexOf(m.seed)] = v;
     if (v.kind === "fail") {
       blamed = true;
@@ -4177,16 +4355,16 @@ export async function test_batch(seeds: bigint[]): Promise<Verdict[]> {
   if (!blamed) {
     const f = save_finding(collect[0].seed, "batch-only",
       ["no member fails alone -- the MERGE is at fault, not the compiler", why,
-        "members: " + collect.map((m) => String(m.seed)).join(" ")], src);
+        "members: " + collect.map((m) => String(m.seed)).join(" ")], src, false, metal);
     console.log("FINDING batch-only seeds=" + collect.length + "\n  " + why.split("\n")[0] + "\n  -> " + f);
     vs[0] = { kind: "fail" };
   }
   return vs;
 }
 
-export async function test_one(seed: bigint, collect?: { seed: bigint; want: string }[], known?: string): Promise<Verdict> {
+export async function test_one(seed: bigint, collect?: { seed: bigint; want: string }[], known?: string, metal = WITH_METAL): Promise<Verdict> {
   if (WITH_IO) {
-    return test_io(seed);
+    return test_io(seed, metal);
   }
   const { src, raw, feats, files } = phase_sync("gen", () => gen_program(seed, false));
   // fuzzy : f32 transcendentals are each backend libm's FLOAT routines by ruling
@@ -4319,10 +4497,10 @@ export async function test_one(seed: bigint, collect?: { seed: bigint; want: str
       console.log("\nFINDING c-diverge seed=" + String(seed) + " raw=" + want + " c=" + c.out + "\n  -> " + f);
       return { kind: "fail" };
     }
-    if (WITH_METAL) {
+    if (metal) {
       const m = await leg_metal(dir, base);
       if (m.kind === "fail") {
-        const f = save_finding(seed, "metal-leg", [m.why ?? "", "interp: " + iout + (ms !== undefined ? " (" + String(ms) + "ms)" : "")], src);
+        const f = save_finding(seed, "metal-leg", [m.why ?? "", "interp: " + iout + (ms !== undefined ? " (" + String(ms) + "ms)" : "")], src, false, true);
         save_aux(files);
         console.log("\nFINDING metal-leg seed=" + String(seed) + "\n  " + (m.why ?? "").split("\n")[0] + "\n  -> " + f);
         return { kind: "fail" };
@@ -4332,7 +4510,7 @@ export async function test_one(seed: bigint, collect?: { seed: bigint; want: str
           save_file("skipped", seed, ["SKIPPED reason=trans-ulp", "raw oracle: " + want, "metal: " + m.out], src);
           return { kind: "skip", note: "trans-ulp" };
         }
-        const f = save_finding(seed, "metal-diverge", ["raw oracle: " + want, "sealed interp: " + iout, "metal: " + m.out], src);
+        const f = save_finding(seed, "metal-diverge", ["raw oracle: " + want, "sealed interp: " + iout, "metal: " + m.out], src, false, true);
         save_aux(files);
         console.log("\nFINDING metal-diverge seed=" + String(seed) + " raw=" + want + " metal=" + m.out + "\n  -> " + f);
         return { kind: "fail" };
@@ -4403,10 +4581,11 @@ export async function fuzz_run(): Promise<void> {
   pool = new Pool(Number(cli_opt("--pool", String(Math.min(JOBS * (BATCH > 1 ? 2 : 1), BATCH > 1 ? 10 : 6)))));
   const smoke = WITH_IO
     ? [9n, 3n]
-    : [1963n, 1782n, 44n, 115n, 4n, 8n];
+    : [8354088790377992228n, 1n, 8709371129873690709n, 1663341875487337578n, 10372713005361028286n, 16390740445785211217n];
   const fixed = SMOKE ? smoke : null;
   const count = fixed?.length ?? COUNT;
-  console.log("bend3 fuzz: count=" + String(count) + (LOOP ? " (loop)" : "") + " seed=" + String(BASE_SEED) + " jobs=" + String(JOBS) + " threads=" + String(THREADS) + (SMOKE ? " +smoke" : "") + (CHECK_ONLY ? " +check-only" : "") + (WITH_IO ? " +io" : "") + (WITH_METAL ? " +metal" : "") + (NO_META || WITH_IO || CHECK_ONLY ? " -metamorphic" : ""));
+  const mixtag = MIXED ? " mix(io=" + String(IO_PCT) + "% metal=" + String(METAL_PCT) + "%)" : ((WITH_IO ? " +io" : "") + (WITH_METAL ? " +metal" : ""));
+  console.log("bend3 fuzz: count=" + String(count) + (LOOP ? " (loop)" : "") + " seed=" + String(BASE_SEED) + " jobs=" + String(JOBS) + " threads=" + String(THREADS) + (SMOKE ? " +smoke" : "") + (CHECK_ONLY ? " +check-only" : "") + mixtag + (NO_META || WITH_IO || CHECK_ONLY ? " -metamorphic" : ""));
   const t0 = performance.now();
   let seed = BASE_SEED;
   let done = 0;
@@ -4415,15 +4594,23 @@ export async function fuzz_run(): Promise<void> {
   const total = (): number => (LOOP && fixed === null ? Infinity : count);
   while (done < total()) {
     while (inflight.size < JOBS && launched < total()) {
+      // the batch's type + Metal leg are rolled ONCE off its first seed, so a
+      // batch stays homogeneous (IO and pure do not merge) and a mixed run
+      // reproduces; --io / --metal pin the rolls at 100
+      const first = fixed?.[launched] ?? seed;
+      const io = batch_roll(first, 0x10n) < IO_PCT;
+      const metal = batch_roll(first, 0x20n) < METAL_PCT;
       const batch: bigint[] = [];
-      while (batch.length < (WITH_IO ? 1 : BATCH) && launched < total()) {
+      while (batch.length < BATCH && launched < total()) {
         batch.push(fixed?.[launched] ?? seed);
         if (fixed === null) {
           seed = rng_step(seed);
         }
         launched++;
       }
-      const p = (batch.length > 1 ? test_batch(batch) : test_one(batch[0]).then((v) => [v]))
+      const p = (batch.length > 1
+        ? (io ? test_io_batch(batch, metal) : test_batch(batch, metal))
+        : (io ? test_io(batch[0], metal) : test_one(batch[0], undefined, undefined, metal)).then((v) => [v]))
         .then((vs) => {
           for (const v of vs) {
             tally[v.kind]++;
