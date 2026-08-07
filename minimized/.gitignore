@@ -1,0 +1,4 @@
+# hand-reduced repros of findings/ seeds are tracked; build artifacts are not
+*
+!.gitignore
+!*.bend
