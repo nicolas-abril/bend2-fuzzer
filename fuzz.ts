@@ -9,9 +9,11 @@
 // program or a rejection of generated source is a finding; resource blowups
 // (timeouts, stack overflows) are persisted but not failures.
 //
-//   bun fuzz.ts [count] [--seed N] [--jobs N] [--threads N]
-//     [--metal] [--io] [--opt N] [--dump] [--dump-min] [--dump-raw] [--no-meta]
-//     [--keep] [--loop] [--smoke] [--check-only]
+//   bun fuzz.ts [count] [--seed N] [--jobs N] [--threads N] [--opt N]
+//     [--batch N] [--pool N] [--metal] [--io] [--no-meta] [--check-only]
+//     [--smoke] [--loop] [--keep] [--profile]
+//     [--dump] [--dump-min] [--dump-raw] [-h|--help]
+//   (`bun fuzz.ts --help` prints the annotated flag reference)
 //
 // Everything folds into one U32 scalar because that is the only value shape
 // all three runtimes print identically. Every generated sub-value is folded
@@ -349,6 +351,42 @@ const BATCH = Math.max(1, Math.min(64, Number(cli_opt("--batch", WITH_IO ? "1" :
 const LOOP = cli_flag("--loop");
 const SMOKE = cli_flag("--smoke");
 const CHECK_ONLY = cli_flag("--check-only");
+
+// print_help : the flag reference; kept in step with the const block above
+export function print_help(): void {
+  process.stdout.write([
+    "bend3 differential fuzzer -- generates typed Bend programs and cross-checks",
+    "the interpreter (spec), the compiled C backend, and optionally Metal.",
+    "",
+    "Usage: bun fuzz.ts [count] [options]",
+    "",
+    "  count          seeds to run (default 100)",
+    "",
+    "Options:",
+    "  --seed N       base seed (default: random)",
+    "  --jobs N       parallel worker jobs (default: min(8, cpus-2))",
+    "  --threads N    NUM_THREADS for the compiled/Metal runtime (default 1)",
+    "  --opt N        clang optimization level -O<N> (default 3)",
+    "  --batch N      seeds per worker batch, 1..64 (default 16; 1 with --io)",
+    "  --pool N       worker pool size (default: derived from jobs/batch)",
+    "  --metal        also run the Metal (GPU) backend",
+    "  --io           IO-program mode: effects, unbatched, no metamorphic leg",
+    "  --no-meta      disable the min-parens metamorphic sibling",
+    "  --check-only   only typecheck; skip running the backends",
+    "  --smoke        run the fixed smoke-seed set and assert feature coverage",
+    "  --loop         run until a finding (ignored with --smoke)",
+    "  --keep         keep temporary build artifacts",
+    "  --profile      print a phase-timing report at the end",
+    "  --dump         print the generated sealed program for --seed and exit",
+    "  --dump-min     print its min-parens sibling and exit",
+    "  --dump-raw     print the raw (unsealed) program and exit",
+    "  -h, --help     show this help and exit",
+    "",
+    "Findings and resource skips land in findings/ (git-ignored), each with a",
+    "`repro:` header line; see the top-of-file comment for the full model.",
+    "",
+  ].join("\n"));
+}
 
 // Phase
 // -----
@@ -4444,7 +4482,9 @@ export async function fuzz_run(): Promise<void> {
 }
 
 if (path.resolve(process.argv[1] ?? "") === import.meta.filename) {
-  if (cli_flag("--worker")) {
+  if (cli_flag("--help") || cli_flag("-h")) {
+    print_help();
+  } else if (cli_flag("--worker")) {
     await worker_main();
   } else {
     await fuzz_run();
