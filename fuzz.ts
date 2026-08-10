@@ -104,13 +104,14 @@
 //   the refcount removal an extra owner of a Data value is an inferred
 //   eager deep copy (copy$) and a dominated read a borrow, and that
 //   inference is a prime target.
-// - Quantities: `+T`/Rco types and `+x` binder sigils are GONE from the
-//   language (ruling B); generated binders are bare Lone or `-x` NONE --
-//   an erased param a minted body may not consume, and an erased CTOR
-//   FIELD (base's own Op is that shape). An erased field is skipped by
-//   every fold (folding consumes it), re-passed untouched by ctor
-//   rebuilds, and disqualifies its ctor from the one-word array-default
-//   path; self fields stay live, since the structural fold walks them.
+// - Quantities: one `syn_quant` draw owns every generated site whose syntax
+//   quantity is free to vary. Runtime arrows, type parameters, ctor fields,
+//   forall binders, and dependent arrows choose Lone/None; minted def
+//   parameters additionally choose Comp.
+//   An erased param may not be consumed, and erased ctor fields are skipped
+//   by every fold, re-passed untouched by ctor rebuilds, and disqualify their
+//   ctor from the one-word array-default path. Recursive self fields stay
+//   live, since the structural fold walks them. Many remains checker-internal.
 // - Non-inferable heads (ctors, list/char/string literals, lambdas, {=})
 //   need checked positions: argument and field holes are checked; every
 //   non-word let is annotated `{v : T}` (ty_str renders any T, functions
@@ -249,9 +250,10 @@
 // would wedge the interpreter). Closure-field datatypes (clofield)
 // live outside the ADT model as dedicated intro/apply pairs.
 //
-// Arrows carry quantities: fun types are -> (Lone) or --> (None,
-// erased), and None VALUES are minted defs passed by name (sigiled
-// lambda binders are not inline syntax; qfun). Dependent arrows
+// Arrows carry quantities: runtime fun types are -> (Lone) or --> (None,
+// erased), and None VALUES are minted defs passed by name (sigiled lambda
+// binders are not inline syntax; qfun). Comp appears on top-level definition
+// parameters, where specialization consumes it. Dependent arrows
 // (@z: U32. F(z)) ride the dep kit as the section of a family.
 //
 // In io mode, IO is itself first-class (io_first/io_val): actions are
@@ -597,20 +599,23 @@ export function e_ann_bind(name: string, val: E, type: string): string {
 // ADT's two "tvars" are the telescope A and the constant family's result:
 // `Sg(A: Type, B: A -> Type)` instantiated as `Sg(T1, z => T2)`.
 
+type SynQuant = "none" | "lone" | "comp";
+type RunQuant = Exclude<SynQuant, "comp">;
+
 type T =
   | { k: "u32" }
   | { k: "f32" }
   | { k: "tvar"; n: string }
   | { k: "adt"; a: Adt; args: T[] }
-  | { k: "fun"; dom: T; cod: T; q?: "none" }
+  | { k: "fun"; dom: T; cod: T; q: RunQuant }
   | { k: "io"; t: T }
   | { k: "eql"; t: T; side: string };
 
 type TyHole = { vars: string[]; self?: T };
-// er : er: the index of this ctor's ERASED field (-1: none). An erased
-// field is bound at None wherever the ctor is matched, so nothing
-// may consume it -- folds skip it and rebuilds re-pass it untouched.
-type Ctor = { name: string; fields: T[]; er: number };
+// q : each field's surface quantity. An erased field is bound at None wherever
+// the ctor is matched, so nothing may consume it -- folds skip it and rebuilds
+// re-pass it untouched.
+type Ctor = { name: string; fields: T[]; q: RunQuant[] };
 type Adt = {
   name: string;
   tvars: string[];
@@ -645,10 +650,10 @@ let SIDES: Map<string, string> = new Map();
 let MINTS = 0;
 let FEAT: Record<string, number> = {};
 
-// er : er: index of this def's ERASED param, if any. It changes the ARROW
-// (`-->`, not `->`), so a partial application that stops before it does
-// not have a plain function type.
-type DefR = { name: string; tps: string[]; ps: T[]; ret: T; mask?: Array<number | null>; er?: number };
+// q : each parameter's surface quantity. A partial application may leave only
+// a Lone parameter: None changes the residual arrow to -->, while Comp must be
+// reached and specialized.
+type DefR = { name: string; tps: string[]; ps: T[]; ret: T; q?: SynQuant[]; mask?: Array<number | null> };
 let DEFR: DefR[] = [];
 
 // Feature
@@ -663,6 +668,38 @@ export function feature_goal(k: string, goal: T): void {
   if (goal.k !== "u32") {
     feature_add(k + "-goal");
   }
+}
+
+// Quant
+// -----
+
+const RUN_QUANTS: RunQuant[] = ["lone", "none"];
+const SIGN_QUANTS: SynQuant[] = ["lone", "none", "comp"];
+
+// syn_quant : the ONE randomized quantity draw. Callers provide the quantities
+// legal for their syntax/semantic position; Many is observed usage, never
+// binder syntax.
+export function syn_quant<Q extends SynQuant>(site: string, allowed: readonly Q[]): Q {
+  const choices: [number, Q][] = allowed.map((it) => [it === "lone" ? 8 : 1, it]);
+  const q = G.wpick(choices);
+  feature_add("quant-" + site + "-" + q);
+  return q;
+}
+
+export function quant_prefix(q: SynQuant): string {
+  return q === "none" ? "-" : q === "comp" ? "~" : "";
+}
+
+export function quant_arrow(q: SynQuant): string {
+  return q === "none" ? "-->" : q === "comp" ? "-~>" : "->";
+}
+
+export function ctor_quant(c: Ctor, i: number): RunQuant {
+  return c.q[i] ?? "lone";
+}
+
+export function def_quant(d: DefR, i: number): SynQuant {
+  return d.q?.[i] ?? "lone";
 }
 
 // Size
@@ -722,7 +759,7 @@ export function ty_str(t: T): string {
       }
       return t.args.length === 0 ? t.a.name : t.a.name + "(" + t.args.map(ty_str).join(", ") + ")";
     }
-    case "fun": return "(" + ty_str(t.dom) + (t.q === "none" ? " --> " : " -> ") + ty_str(t.cod) + ")";
+    case "fun": return "(" + ty_str(t.dom) + " " + quant_arrow(t.q) + " " + ty_str(t.cod) + ")";
     case "io": return "IO(" + ty_str(t.t) + ")";
     case "eql": return "{" + t.side + " == " + t.side + " : " + ty_str(t.t) + "}";
   }
@@ -732,8 +769,8 @@ export function ty_key(t: T): string {
   return ty_str(t);
 }
 
-export function ty_bind(name: string, t: T): string {
-  return name + ": " + ty_str(t);
+export function ty_bind(name: string, t: T, q: SynQuant = "lone"): string {
+  return quant_prefix(q) + name + ": " + ty_str(t);
 }
 
 export function ty_eq(a: T, b: T): boolean {
@@ -785,7 +822,7 @@ export function ty_unify(pat: T, goal: T, m: Map<string, T>): boolean {
     return pat.a === goal.a && pat.args.every((x, i) => ty_unify(x, goal.args[i], m));
   }
   if (pat.k === "fun" && goal.k === "fun") {
-    return ty_unify(pat.dom, goal.dom, m) && ty_unify(pat.cod, goal.cod, m);
+    return pat.q === goal.q && ty_unify(pat.dom, goal.dom, m) && ty_unify(pat.cod, goal.cod, m);
   }
   if (pat.k === "eql" && goal.k === "eql") {
     return false;
@@ -800,8 +837,8 @@ export function need_list(): Adt {
   if (LISTA === null) {
     IMPORTS.add("List");
     const a: Adt = { name: "List", tvars: ["A"], ctors: [], rec: true, data: [0] };
-    a.ctors.push({ name: "Cons", fields: [{ k: "tvar", n: "A" }, { k: "adt", a, args: [{ k: "tvar", n: "A" }] }], er: -1 });
-    a.ctors.push({ name: "Nil", fields: [], er: -1 });
+    a.ctors.push({ name: "Cons", fields: [{ k: "tvar", n: "A" }, { k: "adt", a, args: [{ k: "tvar", n: "A" }] }], q: ["lone", "lone"] });
+    a.ctors.push({ name: "Nil", fields: [], q: [] });
     LISTA = a;
   }
   return LISTA;
@@ -810,7 +847,7 @@ export function need_list(): Adt {
 export function need_char(): Adt {
   if (CHARA === null) {
     IMPORTS.add("Char");
-    CHARA = { name: "Char", tvars: [], ctors: [{ name: "Char", fields: [U32C], er: -1 }], rec: false, data: [] };
+    CHARA = { name: "Char", tvars: [], ctors: [{ name: "Char", fields: [U32C], q: ["lone"] }], rec: false, data: [] };
   }
   return CHARA;
 }
@@ -826,7 +863,7 @@ export function need_pair(a: T, b: T): T {
     PAIRA = {
       name: "Pair",
       tvars: ["A", "B"],
-      ctors: [{ name: "Tuple", fields: [{ k: "tvar", n: "A" }, { k: "tvar", n: "B" }], er: -1 }],
+      ctors: [{ name: "Tuple", fields: [{ k: "tvar", n: "A" }, { k: "tvar", n: "B" }], q: ["lone", "lone"] }],
       rec: false,
       data: [0, 1],
       dep: true,
@@ -842,7 +879,7 @@ export function need_unit(): T {
     UNITA = {
       name: "Unit",
       tvars: [],
-      ctors: [{ name: "U", fields: [], er: -1 }],
+      ctors: [{ name: "U", fields: [], q: [] }],
       rec: false,
       data: [],
       sugar: "unit",
@@ -906,21 +943,22 @@ export function adt_new(): Adt {
   const nctors = size_pick(1 + G.int(3), 40);
   for (let c = 0; c < nctors; c++) {
     const fields: T[] = [];
+    const qs: RunQuant[] = [];
     const nf = size_pick(G.int(4), 12);
     for (let f = 0; f < nf; f++) {
       const field = syn_ty(2, true, { vars: tvars, self: c > 0 ? self : undefined });
+      const self_field = field.k === "adt" && field.a === a;
+      const q = syn_quant("ctor-field", self_field ? ["lone"] : RUN_QUANTS);
       fields.push(field);
-      if (field.k === "adt" && field.a === a) {
+      qs.push(q);
+      if (self_field) {
         a.rec = true;
       }
+      if (q === "none") {
+        feature_add("erased-field");
+      }
     }
-    const cand = fields.map((f, i) => ({ f, i }))
-      .filter((x) => !(x.f.k === "adt" && x.f.a === a));
-    const er = cand.length > 0 && G.chance(0.2) ? G.pick(cand).i : -1;
-    if (er >= 0) {
-      feature_add("erased-field");
-    }
-    a.ctors.push({ name: name + ("abcd"[c] ?? "k" + String(c)), fields, er });
+    a.ctors.push({ name: name + ("abcd"[c] ?? "k" + String(c)), fields, q: qs });
   }
   let deps: number[] | null = [];
   for (const c of a.ctors) {
@@ -938,7 +976,7 @@ export function adt_new(): Adt {
   a.data = deps;
   const head = tvars.length > 0 ? name + "<" + tvars.join(",") + ">" : name;
   const rows = a.ctors.map((c) => "  " + c.name + "{"
-    + c.fields.map((f, i) => i === c.er ? "-f" + String(i) + ": " + ty_str(f) : ty_bind("f" + String(i), f)).join(", ") + "}");
+    + c.fields.map((f, i) => ty_bind("f" + String(i), f, ctor_quant(c, i))).join(", ") + "}");
   DECLS.push("type " + head + ":\n" + rows.join("\n"));
   ADTS.push(a);
   return a;
@@ -949,8 +987,10 @@ export function adt_sig_new(): Adt {
   const id = uid_next();
   const name = "Sg" + String(id);
   const a: Adt = { name, tvars: ["A", "B"], ctors: [], rec: false, data: null, dep: true };
-  a.ctors.push({ name: name + "a", fields: [{ k: "tvar", n: "A" }, { k: "tvar", n: "B" }], er: -1 });
-  DECLS.push("type " + name + "(A: Type, B: A -> Type):\n  " + name + "a{a: A, b: B(a)}");
+  a.ctors.push({ name: name + "a", fields: [{ k: "tvar", n: "A" }, { k: "tvar", n: "B" }], q: ["lone", "lone"] });
+  const aq = syn_quant("type-param", RUN_QUANTS);
+  const bq = syn_quant("type-param", RUN_QUANTS);
+  DECLS.push("type " + name + "(" + quant_prefix(aq) + "A: Type, " + quant_prefix(bq) + "B: A -> Type):\n  " + name + "a{a: A, b: B(a)}");
   ADTS.push(a);
   return a;
 }
@@ -983,7 +1023,7 @@ export function syn_ty(fuel: number, data: boolean, hole?: TyHole): T {
     [fuel > 0 ? 10 : 0, () => need_pair(syn_ty(fuel - 1, true, nested), syn_ty(fuel - 1, true, nested))],
     [fuel > 0 ? 5 : 0, () => need_unit()],
     [!data && fuel > 0 ? 8 : 0, () => {
-      const q = G.wpick<"none" | undefined>([[80, undefined], [20, "none"]]);
+      const q = syn_quant("arrow", RUN_QUANTS);
       const dom = G.pick([U32C, F32C]);
       return { k: "fun", q, dom, cod: syn_ty(fuel - 1, true) } as T;
     }],
@@ -1309,9 +1349,14 @@ export function syn(goal: T, env: V[], fuel: number): E {
         const b = "y" + String(uid_next());
         if (goal.q === "none") {
           feature_add("qfun");
+          const body = e_at(syn(goal.cod, [], Math.min(Math.max(0, fuel - 1), 2)));
+          if (G.chance(0.5)) {
+            feature_add("qfun-inline");
+            return e_atom(b + " => " + body);
+          }
           const name = "qf" + String(uid_next());
-          DEFS.push("def " + name + "(-" + b + ": " + ty_str(goal.dom) + ") -> " + ty_str(goal.cod) + ":\n  "
-            + e_at(syn(goal.cod, [], Math.min(Math.max(0, fuel - 1), 2))));
+          DEFS.push("def " + name + "(" + ty_bind(b, goal.dom, "none") + ") -> " + ty_str(goal.cod) + ":\n  "
+            + body);
           return e_atom(name);
         }
         const benv = env.concat([v_many(b, goal.dom)]);
@@ -1323,12 +1368,12 @@ export function syn(goal: T, env: V[], fuel: number): E {
       return G.wpick<() => E>([
         [var_w, pick_var],
         [35, lam],
-        [fuel >= 1 && goal.q === undefined ? 15 : 0, () => {
+        [fuel >= 1 && goal.q === "lone" ? 15 : 0, () => {
           const cands = DEFR.filter((d) =>
             d.tps.length === 0 && d.ps.length >= 1
             && ty_eq(d.ps[d.ps.length - 1], goal.dom) && ty_eq(d.ret, goal.cod)
             && (d.mask?.[d.ps.length - 1] ?? null) === null
-            && d.er !== d.ps.length - 1);
+            && def_quant(d, d.ps.length - 1) === "lone");
           if (cands.length === 0) {
             return lam();
           }
@@ -1371,7 +1416,7 @@ export function syn_apply(goal: T, env: V[], fuel: number): E | null {
   }
   let ft: T = goal;
   for (let i = k - 1; i >= 0; i--) {
-    ft = { k: "fun", dom: doms[i], cod: ft };
+    ft = { k: "fun", dom: doms[i], cod: ft, q: "lone" };
   }
   try {
     const f = syn(ft, env, Math.max(0, fuel - 1));
@@ -1424,34 +1469,21 @@ export function syn_mint_def(goal: T, env: V[]): E | null {
   for (let i = 0; i < nps; i++) {
     ps.push(syn_ty(1, false));
   }
-  // er : an ERASED param: bound at None, so the body may not consume it at
-  // all. Uses are tracked three-valued (None < Lone < Many) and checked
-  // at every binder -- without this, generated defs only ever bound the
-  // upper two, and no value of an erased type was ever built.
-  const er = G.chance(0.25) ? G.int(ps.length + 1) : -1;
-  if (er >= 0) {
+  // q : every parameter independently draws from the complete def-telescope
+  // quantity set. None parameters stay out of the body environment; Comp
+  // parameters remain available because specialization substitutes them.
+  const qs = ps.map(() => syn_quant("def-param", SIGN_QUANTS));
+  if (qs.includes("none")) {
     feature_add("erased");
-    ps.splice(er, 0, syn_plain_ty(1));
   }
-  // comp : ~ (Comp) params -- specialized per call, erased at runtime. This is
-  // syn_comp generalized: any param may carry ~ (a ~ argument cannot be MATCHED
-  // on, but the expression body never inline-matches an env var, so every param
-  // is safe). Function-typed ~ params get APPLIED by syn_apply in the body --
-  // the old call_hof/syn_comp shape now falls out of the general mint.
-  const comp = new Set<number>();
-  for (let i = 0; i < ps.length; i++) {
-    if (i !== er && G.chance(0.1)) {
-      comp.add(i);
-    }
-  }
-  if (comp.size > 0) {
+  if (qs.includes("comp")) {
     feature_goal("comp", goal);
   }
-  const penv = ps.map((p, i) => v_many("p" + String(i), p)).filter((_, i) => i !== er);
+  const penv = ps.map((p, i) => v_many("p" + String(i), p)).filter((_, i) => qs[i] !== "none");
   const body = syn(goal, penv, 2);
-  const params = ps.map((p, i) => i === er ? "-p" + String(i) + ": " + ty_str(p) : (comp.has(i) ? "~" : "") + ty_bind("p" + String(i), p));
+  const params = ps.map((p, i) => ty_bind("p" + String(i), p, qs[i]));
   DEFS.push("def " + name + "(" + params.join(", ") + ") -> " + ty_str(goal) + ":\n  " + e_at(body));
-  DEFR.push({ name, tps: [], ps, ret: goal, er: er >= 0 ? er : undefined });
+  DEFR.push({ name, tps: [], ps, ret: goal, q: qs });
   const args = ps.map((p) => e_at(syn(p, env, 1)));
   return e_atom(name + "(" + args.join(", ") + ")");
 }
@@ -1524,7 +1556,9 @@ export function syn_assert(goal: T, env: V[], fuel: number): E {
   // in the same file as its assertion, and the module split cuts
   // between entries
   const bodiless = G.chance(0.3);
-  DEFS.push("assert " + proof + ":\n  forall -A : Type\n  forall x : A\n  {x == x : A}"
+  const aq = syn_quant("forall", RUN_QUANTS);
+  const xq = syn_quant("forall", RUN_QUANTS);
+  DEFS.push("assert " + proof + ":\n  forall " + quant_prefix(aq) + "A : Type\n  forall " + quant_prefix(xq) + "x : A\n  {x == x : A}"
     + (bodiless ? "" : "\n\ndef " + proof + "(A, x):\n  {==}"));
   const body = ty_eq(witness, goal)
     ? e_atom("x")
@@ -1631,13 +1665,14 @@ export function syn_ford(goal: T, env: V[], fuel: number): E {
   const Z = N + "." + N + "z";
   const S = N + "." + N + "s";
   DECLS.push("type " + N + ":\n  " + N + "z{}\n  " + N + "s{p: " + N + "}");
-  const erased = G.chance(0.35);
+  const eq_q = syn_quant("ctor-field", RUN_QUANTS);
+  const erased = eq_q === "none";
   const midx = G.chance(0.3);
   const P = syn_plain_ty(1);
   const V = "Fv" + id;
   const VZ = V + "." + V + "z";
   const VS = V + "." + V + "s";
-  const em = erased ? "-" : "";
+  const em = quant_prefix(eq_q);
   const ixd = midx ? "(n: " + N + ", m: U32)" : "(n: " + N + ")";
   const fat = (i: string): string => midx ? V + "(" + i + ", m)" : V + "(" + i + ")";
   DECLS.push("type " + V + ixd + ":\n  " + V + "z{" + em + "eq: {n == " + Z + "{} : " + N + "}, w: " + ty_str(P) + "}\n  "
@@ -1754,12 +1789,23 @@ export function syn_dep(goal: T, env: V[], fuel: number): E {
     // F: U32 -> Type param, a dependent-arrow @z. F(z) arg (pick by
     // name), and an instantiation-typed continuation F(0) -> U32
     feature_goal("hkdep", goal);
-    const hm = "hm" + id;
-    DEFS.push("def " + hm + "(x: " + ty_str(left) + ") -> U32:\n  "
-      + (left.k === "u32" ? "x" : e_at(syn(U32C, [v_many("x", left)], 1))));
     const hk = "hk" + id;
-    DEFS.push("def " + hk + "(-F: U32 -> Type, g: @z:U32 -> F(z), h: (F(0) -> U32)) -> U32:\n  h(g(0))");
-    const call = hk + "(" + fam + ", " + pick + ", " + hm + ")";
+    const dq = syn_quant("dep-arrow", RUN_QUANTS);
+    let call: string;
+    if (dq === "none") {
+      const gn = "hn" + id;
+      const hm = "hm" + id;
+      DEFS.push("def " + gn + "(" + ty_bind("z", U32C, "none") + ") -> U32:\n  " + String(G.int(64)));
+      DEFS.push("def " + hm + "(x: U32) -> U32:\n  x + " + String(G.int(8)));
+      DEFS.push("def " + hk + "(-F: U32 -> Type, g: @" + quant_prefix(dq) + "z:U32 -> U32, h: (U32 -> U32)) -> U32:\n  h(g(0))");
+      call = hk + "(" + fam + ", " + gn + ", " + hm + ")";
+    } else {
+      const hm = "hm" + id;
+      DEFS.push("def " + hm + "(x: " + ty_str(left) + ") -> U32:\n  "
+        + (left.k === "u32" ? "x" : e_at(syn(U32C, [v_many("x", left)], 1))));
+      DEFS.push("def " + hk + "(-F: U32 -> Type, g: @" + quant_prefix(dq) + "z:U32 -> F(z), h: (F(0) -> U32)) -> U32:\n  h(g(0))");
+      call = hk + "(" + fam + ", " + pick + ", " + hm + ")";
+    }
     if (goal.k === "u32") {
       return e_atom(call);
     }
@@ -1923,8 +1969,8 @@ export function rd_deep(name: string, t: T & { k: "adt" }, param: T, selfkey: st
 
 export function rd_match(name: string, t: T & { k: "adt" }, param: T, selfkey: string): string {
   const a = t.a;
-  const recs = a.ctors.filter((c) => c.fields.filter((f) => f.k === "adt" && f.a === a).length === 1 && c.er < 0);
-  const bases = a.ctors.filter((c) => !c.fields.some((f) => f.k === "adt" && f.a === a) && c.er < 0);
+  const recs = a.ctors.filter((c) => c.fields.filter((f) => f.k === "adt" && f.a === a).length === 1 && !c.q.includes("none"));
+  const bases = a.ctors.filter((c) => !c.fields.some((f) => f.k === "adt" && f.a === a) && !c.q.includes("none"));
   const peel = a.ctors.length === 2 && recs.length === 1 && bases.length === 1 ? size_pick(1, 4) : 1;
   if (peel > 1) {
     feature_add("peel");
@@ -1934,7 +1980,7 @@ export function rd_match(name: string, t: T & { k: "adt" }, param: T, selfkey: s
   const rows = a.ctors.map((c) => {
     const vs = c.fields.map((_, i) => "x" + String(i));
     const parts = c.fields.flatMap((f, i) => {
-      if (i === c.er) {
+      if (ctor_quant(c, i) === "none") {
         return [];
       }
       const ft = ty_sub(f, m);
@@ -1983,7 +2029,7 @@ export function tf_ensure(t: T & { k: "adt" }): string {
     const vs = c.fields.map((_, i) => "x" + String(i));
     const args = c.fields.map((f, i) => {
       const ft = ty_sub(f, m);
-      if (i === c.er) {
+      if (ctor_quant(c, i) === "none") {
         return vs[i];
       }
       if (ft.k === "u32") {
@@ -2146,7 +2192,7 @@ export function match_body(env: V[], depth: number, ind: number): string {
       const vs = c.fields.map((_, i) => "m" + String(uid_next()));
       const folded = c.fields
         .flatMap((f, i) => {
-          if (i === c.er) {
+          if (ctor_quant(c, i) === "none") {
             return [];
           }
           const ft = ty_sub(f, m);
@@ -2158,7 +2204,7 @@ export function match_body(env: V[], depth: number, ind: number): string {
           }
           return [e_atom(rd_ensure(ft) + "(" + vs[i] + ")")];
         })
-        .concat([num_gen_u32(env.concat(c.fields.flatMap((f, i) => (i !== c.er && ty_sub(f, m).k === "u32" ? [v_many(vs[i], U32C)] : []))), 1)]);
+        .concat([num_gen_u32(env.concat(c.fields.flatMap((f, i) => (ctor_quant(c, i) !== "none" && ty_sub(f, m).k === "u32" ? [v_many(vs[i], U32C)] : []))), 1)]);
       const pat = a.name + "." + c.name + "{" + vs.join(", ") + "}";
       return pad + "  case " + pat + ":\n" + " ".repeat(ind + 4) + e_at(num_combine(folded));
     });
@@ -2332,7 +2378,7 @@ export function destructure_gen(): { defname: string } {
   const id = uid_next();
   const a: Adt = { name: "R" + String(id), tvars: [], ctors: [], rec: false, data: [] };
   const nf = 2 + G.int(2);
-  a.ctors.push({ name: "R" + String(id) + "a", fields: Array.from({ length: nf }, () => U32C as T), er: -1 });
+  a.ctors.push({ name: "R" + String(id) + "a", fields: Array.from({ length: nf }, () => U32C as T), q: Array.from({ length: nf }, () => "lone") });
   DECLS.push("type " + a.name + ":\n  " + a.ctors[0].name + "{" + a.ctors[0].fields.map((_, i) => "f" + String(i) + ": U32").join(", ") + "}");
   ADTS.push(a);
   const mk = "mr" + String(uid_next());
@@ -2522,7 +2568,7 @@ export function let_fork(env: V[]): Line {
 }
 
 export function let_adt_dflt(a: Adt): string | null {
-  const ok = a.ctors.filter((c) => c.er < 0 && (c.fields.length === 0 || (c.fields.length === 1 && c.fields[0].k === "u32")));
+  const ok = a.ctors.filter((c) => !c.q.includes("none") && (c.fields.length === 0 || (c.fields.length === 1 && c.fields[0].k === "u32")));
   if (ok.length === 0) {
     return null;
   }
@@ -2534,7 +2580,7 @@ export function let_array(env: V[]): Line {
   feature_add("array");
   const able = ADTS.filter((x) =>
     x.tvars.length === 0 && x.dep !== true && x.data !== null
-    && x.ctors.some((c) => c.er < 0 && (c.fields.length === 0 || (c.fields.length === 1 && c.fields[0].k === "u32"))));
+    && x.ctors.some((c) => !c.q.includes("none") && (c.fields.length === 0 || (c.fields.length === 1 && c.fields[0].k === "u32"))));
   const mode = G.wpick<string>([[60, "u32"], [able.length > 0 ? 40 : 0, "adt"]]);
   const a = mode === "u32" ? null : G.pick(able);
   const elT: T = a !== null ? { k: "adt", a, args: [] } : U32C;
@@ -2643,7 +2689,7 @@ export function let_partial(env: V[]): Line {
     lines.push(g + " = " + name + gpu_mark() + "(" + e_at(num_gen_u32(env, 1)) + ")");
     lines.push(x + " = " + g + "(" + e_at(num_gen_u32(env, 1)) + ", " + e_at(num_gen_u32(env, 1)) + ")");
   } else {
-    const fun: T = { k: "fun", dom: U32C, cod: U32C };
+    const fun: T = { k: "fun", dom: U32C, cod: U32C, q: "lone" };
     const lam = syn(fun, env, 1);
     lines.push(g + " : " + ty_str(fun) + " = " + lam.s);
     const hf = "hg" + String(uid_next());
