@@ -86,10 +86,12 @@
 // prints each member's result/tail/extra in order, so clang and process
 // spawn are paid once per batch while attribution stays per-line. The
 // interp legs run per member (they are the bottleneck and parallelize
-// across the worker pool). A failing batch re-runs its members solo at uid
-// base 0, so saved findings reproduce under a bare --seed N; a batch that
-// fails when no member does is itself a finding (batch-only: the merge or
-// whole-book emission is at fault).
+// across the worker pool). A member whose tail dies gets its own main
+// block behind the FZ_MEMBER environment variable, so one binary serves
+// the plain run and one run per dying member. A failing batch re-runs its
+// members solo at uid base 0, so saved findings reproduce under a bare
+// --seed N; a batch that fails when no member does is itself a finding
+// (batch-only: the merge or whole-book emission is at fault).
 //
 // Findings land in findings/seed-N.bend (program + verdict header + exact
 // repro line); resource blowups (timeouts, stack overflows — WONTFIX rule
@@ -2883,26 +2885,53 @@ function member_expect(m: Member, want: string | null): Expect {
 
 type Spelling = "sealed" | "raw" | "both";
 
-function member_main(ms: Member[], spelling: Spelling): string {
-  const rows: string[] = [];
-  let k = 0;
-  for (const m of ms) {
-    rows.push("    w" + String(k++) + " : Unit <- IO.print(U32.show(" + (spelling === "raw" ? m.rawName : m.resultName) + "()))");
-    if (m.tail !== null) {
-      rows.push(...m.tail.lines.map((l) => "    " + l));
-    }
-    const dies = m.tail !== null && m.tail.code !== 0;
-    if (m.extraName !== null && !dies) {
-      rows.push("    w" + String(k++) + " : Unit <- IO.print(U32.show(" + m.extraName + "()))");
-    }
-    if (dies) {
-      const key = (m.seed & 0xffffffn).toString(16);
-      rows.push("    IO.die(Unit, " + String((m.tail as IoTail).code) + ", \"fzdie_" + key + "\")");
-      return "def main() -> IO(Unit):\n  do IO<Unit>:\n" + rows.join("\n");
-    }
+function member_dies(m: Member): boolean {
+  return m.tail !== null && m.tail.code !== 0;
+}
+
+// member_rows : one member's lines of a main — its result, its tail, and
+// its extra unless it dies (the IO.die is the block's end)
+function member_rows(m: Member, i: number, spelling: Spelling): string[] {
+  const rows = ["w" + String(i) + "a : Unit <- IO.print(U32.show(" + (spelling === "raw" ? m.rawName : m.resultName) + "()))"];
+  if (m.tail !== null) {
+    rows.push(...m.tail.lines);
   }
-  rows.push("    IO.pure(Unit, Unit{})");
-  return "def main() -> IO(Unit):\n  do IO<Unit>:\n" + rows.join("\n");
+  if (m.extraName !== null && !member_dies(m)) {
+    rows.push("w" + String(i) + "b : Unit <- IO.print(U32.show(" + m.extraName + "()))");
+  }
+  return rows;
+}
+
+// member_main : the program's main. With no dying member it prints every
+// member in order. A dying member ends the process, so it gets its own
+// block, and main dispatches on the FZ_MEMBER environment variable: unset
+// runs the non-dying members (fzall), "i" runs member i's block — one
+// binary, one run per dying member plus one for the rest.
+function member_main(ms: Member[], spelling: Spelling): string {
+  const block = (name: string, rows: string[], end: string): string =>
+    "def " + name + "() -> IO(Unit):\n  do IO<Unit>:\n" + rows.concat([end]).map((r) => "    " + r).join("\n");
+  const dying = ms.map((_, i) => i).filter((i) => member_dies(ms[i]));
+  const rest = ms.flatMap((m, i) => member_dies(m) ? [] : member_rows(m, i, spelling));
+  if (dying.length === 0) {
+    return block("main", rest, "IO.pure(Unit, Unit{})");
+  }
+  const RES = "Result<&1, &1, U32 & String, String>";
+  const sel = (j: number): string => "fzsel" + String(j) + "(String.eq(s, \"" + String(dying[j]) + "\"), s)";
+  const defs = [block("fzall", rest, "IO.pure(Unit, Unit{})")];
+  for (const i of dying) {
+    const m = ms[i];
+    defs.push(block("fzm" + String(i), member_rows(m, i, spelling),
+      "IO.die(Unit, " + String((m.tail as IoTail).code) + ", \"fzdie_" + (m.seed & 0xffffffn).toString(16) + "\")"));
+  }
+  // the selector chain, last link first: no forward references
+  for (let j = dying.length - 1; j >= 0; j--) {
+    defs.push("def fzsel" + String(j) + "(z: Bool, +s: String) -> IO(Unit):\n  match z:\n    case True{}:\n      fzm" + String(dying[j])
+      + "()\n    case False{}:\n      " + (j + 1 < dying.length ? sel(j + 1) : "fzall()"));
+  }
+  defs.push("def fzdis(r: " + RES + ") -> IO(Unit):\n  match r:\n    case Done{s0}:\n      +s = s0\n      " + sel(0)
+    + "\n    case Fail{e}:\n      fzall()");
+  defs.push("def main() -> IO(Unit):\n  do IO<Unit>:\n    sel : " + RES + " <- IO.get_env(\"FZ_MEMBER\")\n    fzdis(sel)");
+  return defs.join("\n\n");
 }
 
 // assemble : one program. "sealed" is what the compiled legs run and
@@ -3209,9 +3238,12 @@ class Pool {
 
 type Run = { ok: boolean; out: string; err: string; timeout: boolean; code: number };
 
-function leg_exec(cmd: string, args: string[], cwd: string, timeout: number): Promise<Run> {
+type Env = Record<string, string> | undefined;
+
+function leg_exec(cmd: string, args: string[], cwd: string, timeout: number, env: Env = undefined): Promise<Run> {
   return new Promise((resolve) => {
-    child.execFile(cmd, args, { cwd, timeout, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (e, out, err) => {
+    const opts = { cwd, timeout, encoding: "utf8" as const, maxBuffer: 64 * 1024 * 1024, env: env === undefined ? undefined : { ...process.env, ...env } };
+    child.execFile(cmd, args, opts, (e, out, err) => {
       const killed = e !== null && (e as { killed?: boolean }).killed === true;
       const ec = e === null ? 0 : typeof (e as { code?: unknown }).code === "number" ? (e as { code: number }).code : -1;
       resolve({ ok: e === null, out, err, timeout: killed, code: ec });
@@ -3223,8 +3255,8 @@ const CC_FLAGS = [OPT, "-std=c11", "-w", "-fno-slp-vectorize"];
 
 type LegOut = { kind: "ok" | "skip" | "fail"; out: string; err: string; code: number; why?: string };
 
-async function leg_run(bin: string, args: string[], dir: string, cap: number): Promise<LegOut> {
-  const run = await leg_exec(bin, args, dir, cap);
+async function leg_run(bin: string, args: string[], dir: string, cap: number, env: Env = undefined): Promise<LegOut> {
+  const run = await leg_exec(bin, args, dir, cap, env);
   const why = run.timeout ? "RUN TIMEOUT after " + String(cap) + "ms (the interpreter finished this program — livelock/perf-cliff suspect)" : undefined;
   return { kind: run.timeout ? "fail" : "ok", out: run.out, err: run.err, code: run.code, why };
 }
@@ -3433,8 +3465,23 @@ async function member_interp(ms: MemberState): Promise<void> {
   ms.want = want;
 }
 
-// group_expect : the merged program's expected stdout/stderr/exit plus the
-// stdout line indexes owned by trans-flagged members' extra lines
+// RunSpec : one execution of the batch binary — its environment, what it
+// must print, and the stdout line indexes owned by trans-flagged members'
+// extra lines. group_runs: the plain run over the non-dying members, then
+// one run per dying member selected by FZ_MEMBER.
+type RunSpec = { label: string; env: Env; exp: Expect; transLines: number[] };
+
+function group_runs(states: MemberState[]): RunSpec[] {
+  const plain = group_expect(states.filter((s) => !member_dies(s.m)));
+  const runs: RunSpec[] = [{ label: "", env: undefined, ...plain }];
+  states.forEach((s, i) => {
+    if (member_dies(s.m)) {
+      runs.push({ label: " [FZ_MEMBER=" + String(i) + "]", env: { FZ_MEMBER: String(i) }, exp: member_expect(s.m, s.want), transLines: [] });
+    }
+  });
+  return runs;
+}
+
 function group_expect(states: MemberState[]): { exp: Expect; transLines: number[] } {
   const out: Array<string | null> = [];
   const err: string[] = [];
@@ -3471,68 +3518,74 @@ async function group_compiled(states: MemberState[], solo: boolean): Promise<{ f
   if (CHECK_ONLY) {
     return { fail: null, skip: null, ulp: false };
   }
-  const { exp, transLines } = group_expect(live);
+  const runs = group_runs(live);
   const base = "fz" + String(members[0].seed) + (solo ? "s" : "b");
   const dir = fs.mkdtempSync(path.join(TMP, "g-"));
+  const fail = (why: string): { fail: string; skip: null; ulp: boolean } => ({ fail: why, skip: null, ulp: false });
   let ulp = false;
   try {
     const cap = RUN_TIMEOUT * Math.max(1, members.length);
-    // C sequential: the compiled reference
+    const cpu = path.join(dir, base + "_cpu");
+    // C sequential: the compiled reference, every run against its expectation
     const cc = await leg_cc(dir, base, w.csrc ?? "", [], base + "_cpu", CC_TIMEOUT);
     if (cc.skip === true) {
       return { fail: null, skip: cc.why ?? "cc-timeout", ulp: false };
     }
     if (!cc.ok) {
-      return { fail: cc.why ?? "cc failed", skip: null, ulp: false };
+      return fail(cc.why ?? "cc failed");
     }
-    const seq = await phase("run:seq", () => leg_run(path.join(dir, base + "_cpu"), ["--parallel", "off"], dir, cap));
-    if (seq.why !== undefined) {
-      return { fail: "C-SEQ " + seq.why, skip: null, ulp: false };
+    const seqs: LegOut[] = [];
+    for (const r of runs) {
+      const seq = await phase("run:seq", () => leg_run(cpu, ["--parallel", "off"], dir, cap, r.env));
+      if (seq.why !== undefined) {
+        return fail("C-SEQ" + r.label + " " + seq.why);
+      }
+      const d = cmp_expect(r.exp, seq);
+      if (d !== null) {
+        return fail("C-SEQ" + r.label + " vs expectation: " + d);
+      }
+      seqs.push(seq);
     }
-    const seq_diff = cmp_expect(exp, seq);
-    if (seq_diff !== null) {
-      return { fail: "C-SEQ vs expectation: " + seq_diff, skip: null, ulp: false };
-    }
-    // JS
+    // lane : one more leg, every run against its sequential reference
+    const lane = async (label: string, soft: boolean, run: (env: Env) => Promise<LegOut>): Promise<string | null> => {
+      for (let i = 0; i < runs.length; i++) {
+        const got = await run(runs[i].env);
+        if (got.why !== undefined) {
+          return label + runs[i].label + " " + got.why;
+        }
+        const d = cmp_legs(seqs[i], got, runs[i].transLines, soft);
+        if (d.diff !== null) {
+          return label + runs[i].label + " vs C-SEQ: " + d.diff;
+        }
+        ulp = ulp || d.ulp;
+      }
+      return null;
+    };
     const jsf = path.join(dir, base + ".js");
     fs.writeFileSync(jsf, w.jssrc ?? "");
-    const js = await phase("run:js", () => leg_run(process.execPath, [jsf], dir, cap));
-    if (js.why !== undefined) {
-      return { fail: "JS " + js.why, skip: null, ulp: false };
+    const js = await lane("JS", true, (env) => phase("run:js", () => leg_run(process.execPath, [jsf], dir, cap, env)));
+    if (js !== null) {
+      return fail(js);
     }
-    const jd = cmp_legs(seq, js, transLines, true);
-    if (jd.diff !== null) {
-      return { fail: "JS vs C-SEQ: " + jd.diff, skip: null, ulp: false };
-    }
-    ulp = ulp || jd.ulp;
-    // CPU-parallel lane
     if (THREADS > 0) {
-      const par = await phase("run:par", () => leg_run(path.join(dir, base + "_cpu"), ["--threads", String(THREADS), "--gpu", "off"], dir, cap * 2));
-      if (par.why !== undefined) {
-        return { fail: "C-PAR " + par.why, skip: null, ulp: false };
-      }
-      const pd = cmp_legs(seq, par, transLines, false);
-      if (pd.diff !== null) {
-        return { fail: "C-PAR vs C-SEQ: " + pd.diff, skip: null, ulp: false };
+      const par = await lane("C-PAR", false, (env) => phase("run:par", () => leg_run(cpu, ["--threads", String(THREADS), "--gpu", "off"], dir, cap * 2, env)));
+      if (par !== null) {
+        return fail(par);
       }
     }
     // GPU lanes: the same .c rebuilt with the platform flags, run --gpu on,
     // strictly one program at a time
-    const gpu = (label: string, flags: string[], bin: string): Promise<{ skip?: string; fail?: string; ulp?: boolean }> => gpu_serial(async () => {
-      const lane = label.toLowerCase();
+    const gpu = (label: string, flags: string[], bin: string): Promise<{ skip?: string; fail?: string }> => gpu_serial(async () => {
+      const lname = label.toLowerCase();
       const gc = await leg_cc(dir, base, w.csrc ?? "", flags, bin, GPU_CC_TIMEOUT);
       if (gc.skip === true) {
-        return { skip: gc.why ?? lane + "-cc-timeout" };
+        return { skip: gc.why ?? lname + "-cc-timeout" };
       }
       if (!gc.ok) {
         return { fail: label + " " + (gc.why ?? "cc failed") };
       }
-      const gr = await phase("run:" + lane, () => leg_run(path.join(dir, bin), ["--gpu", "on"], dir, GPU_RUN_TIMEOUT * Math.max(1, members.length)));
-      if (gr.why !== undefined) {
-        return { fail: label + " " + gr.why };
-      }
-      const gd = cmp_legs(seq, gr, transLines, true);
-      return gd.diff !== null ? { fail: label + " vs C-SEQ: " + gd.diff } : { ulp: gd.ulp };
+      const f = await lane(label, true, (env) => phase("run:" + lname, () => leg_run(path.join(dir, bin), ["--gpu", "on"], dir, GPU_RUN_TIMEOUT * Math.max(1, members.length), env)));
+      return f !== null ? { fail: f } : {};
     });
     const lanes: Array<[boolean, string, string[], string]> = [
       [WITH_METAL, "METAL", ["-DBEND_METAL=1", "-x", "objective-c", "-fobjc-arc",
@@ -3551,7 +3604,6 @@ async function group_compiled(states: MemberState[], solo: boolean): Promise<{ f
       if (got.fail !== undefined) {
         return { fail: got.fail, skip: null, ulp };
       }
-      ulp = ulp || got.ulp === true;
     }
   } finally {
     if (!KEEP) {
@@ -3574,14 +3626,8 @@ async function test_group(seeds: bigint[], solo: boolean): Promise<Verdict[]> {
 
 // test_members : run the legs over already-generated members
 async function test_members(states: MemberState[], solo: boolean): Promise<Verdict[]> {
-  // die-witness members end the whole process, so at most the LAST batch
-  // member could carry one; divert them to solo runs instead
-  const diverted = solo ? [] : states.filter((s) => s.m.tail !== null && s.m.tail.code !== 0);
-  const grouped = states.filter((s) => !diverted.includes(s));
+  const grouped = states;
   await Promise.all(grouped.map((s) => member_interp(s)));
-  for (const s of diverted) {
-    s.verdict = (await test_members([s], true))[0];
-  }
   const res = await group_compiled(grouped, solo);
   if (res.skip !== null) {
     for (const s of grouped) {

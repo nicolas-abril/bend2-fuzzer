@@ -60,6 +60,13 @@ Restructured on 2026-09-02:
 - **`--reduce N`**: greedy delta reduction of a failing seed (statements,
   extra, IO tail, entries) under the same failure signature; result in
   `findings/seed-N.min.bend`.
+- **Dying members batch**: a member ending in `IO.die` used to be diverted
+  to a solo compile. Now `main` reads `FZ_MEMBER` (unset: the non-dying
+  members via `fzall`; "i": member i's own block `fzm<i>`, selected by a
+  `String.eq` chain) and the harness runs the batch binary once per
+  RunSpec — the plain run plus one per dying member — on every leg, each
+  against its own expectation. Attribution of a failing die run is
+  direct: the member is named by its run.
 
 ## Probed language rules (violate = reject noise)
 

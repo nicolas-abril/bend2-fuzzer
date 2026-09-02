@@ -83,7 +83,11 @@ and process spawn are paid once per batch, attribution stays per line, and
 the interp legs (the bottleneck) run per member across the worker pool. A
 failing batch re-runs members solo at uid base 0, so saved findings
 reproduce under a bare `--seed N`; a batch failing with no failing member is
-itself a finding (`batch-only`).
+itself a finding (`batch-only`). A member whose IO tail ends in `IO.die`
+would end the whole process, so the batch's `main` dispatches on the
+`FZ_MEMBER` environment variable: unset runs the non-dying members, `i`
+runs member i's block and dies — one binary, compiled once, run once
+plainly and once per dying member, every leg alike.
 
 ## Output
 
