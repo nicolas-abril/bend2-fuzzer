@@ -76,9 +76,9 @@ application, do-notation (Maybe/Result/IO), equalities, rewrites, minted
 theorems, dependent families (large elimination and the Word idiom). Tail
 loops descend on any chain-shaped data (at most one self field per
 constructor): the program's own such ADTs, base's List at any element
-type, a minted Peano clone that takes the generic ADT path instead of the
-Nat native, a String, or a Nat; the fuel value is synthesized like any
-other, so loops run over data the program already builds.
+type (the generic ADT path where Nat takes the native), a String, or a
+Nat; the fuel value is synthesized like any other, so loops run over data
+the program already builds.
 
 ## Batching
 

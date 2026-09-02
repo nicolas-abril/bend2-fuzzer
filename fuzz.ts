@@ -66,7 +66,7 @@
 //   - defs are emitted in creation = dependency order; no forward refs.
 //   - recursion descends structurally on the FIRST live column: any chain
 //     adt (at most one self field per constructor) serves as a loop's
-//     fuel, the program's own included, beside a Nat or a String; @unsafe
+//     fuel, the program's own or base's List, beside a Nat or a String; @unsafe
 //     opts out of descent and is emitted rarely.
 //   - non-inferable values in let position ride `x = {v : T}` annotations;
 //     do-binds are annotated (`x : T <- act`); partial applications stop at
@@ -1560,9 +1560,9 @@ function tf_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
 // The fuel is the first column, descended structurally, and any chain
 // type serves — an adt whose every constructor holds at most one self
 // field, so the loop walks a line, not a tree: the program's own such
-// adts, base's List, a minted Peano clone (the generic adt path where
-// Nat takes the W64 native), plus a Nat (deep peels, case 3n+p, exercise
-// the flattener's Succ chains) or a String walked by character. The fuel
+// adts and base's List (the generic adt path where Nat takes the W64
+// native), plus a Nat (deep peels, case 3n+p, exercise the flattener's
+// Succ chains) or a String walked by character. The fuel
 // value is synthesized like any other, so the loop runs over whatever
 // data the program already builds; only the Nat kind counts down a
 // masked number.
@@ -1570,22 +1570,6 @@ function tf_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
 // adt_chain : at most one self field per constructor, and one somewhere
 function adt_chain(a: Adt): boolean {
   return a.rec && a.ctors.every((ct) => ct.fields.filter((f) => f.t.k === "adt" && f.t.a === a).length <= 1);
-}
-
-// peano_ensure : one Peano clone per program, a plain recursive Data
-// type the other kits build, match and fold like any generated adt
-function peano_ensure(c: Ctx): Adt {
-  const got = c.memo.get("peano");
-  if (got !== undefined) {
-    return c.adts.find((a) => a.name === got) as Adt;
-  }
-  const name = "Pn" + String(c.uid());
-  const a: Adt = { name, qps: [], tps: [], kind: Q2, ctors: [], rec: true };
-  a.ctors.push({ name: name + "z", fields: [] }, { name: name + "s", fields: [{ q: 1, t: { k: "adt", a, qs: [], args: [] } }] });
-  c.push("type " + name + " is Data:\n  " + name + "z{}\n  " + name + "s{p: " + name + "}");
-  c.memo.set("peano", name);
-  c.adts.push(a);
-  return a;
 }
 
 function tail_call(c: Ctx, env: V[], fuel: number): E {
@@ -1598,7 +1582,7 @@ function tail_call(c: Ctx, env: V[], fuel: number): E {
   const base = e_at(num_combine(c, accs.map((a2) => e_atom(a2)).concat([num_lit_u32(c)])));
   const step = (extra: V[]): string => accs.map(() => e_at(num_gen_u32(c, henv.concat(extra).map((v) => ({ ...v })), 1))).join(", ");
   const chains = c.adts.filter(adt_chain);
-  const kind = c.g.wpick<string>([[4, "nat"], [2, "str"], [2, "list"], [1, "peano"], [chains.length > 0 ? 3 : 0, "adt"]]);
+  const kind = c.g.wpick<string>([[4, "nat"], [2, "str"], [2, "list"], [chains.length > 0 ? 4 : 0, "adt"]]);
   c.feat("tail-" + kind);
   let fuelP: string;
   let fuelT: T;
@@ -1629,7 +1613,7 @@ function tail_call(c: Ctx, env: V[], fuel: number): E {
   } else {
     // a chain adt: every constructor with a self field recurses on it,
     // its other live fields read to U32 for the step; the rest end
-    const a = kind === "list" ? BASE.List : kind === "peano" ? peano_ensure(c) : c.g.pick(chains);
+    const a = kind === "list" ? BASE.List : c.g.pick(chains);
     const t = adt_inst(c, a, false) ?? { k: "adt", a, qs: a.qps.map(() => Q2), args: a.tps.map(() => U32C) } as T;
     fuelP = "n: " + ty_str(t);
     fuelT = t;
@@ -3861,7 +3845,7 @@ async function fuzz_run(): Promise<void> {
   }
   // smoke : hand-verified per-feature cover (re-pick after any edit that
   // remaps seeds: each seed passes solo and the union covers smoke_need)
-  const smoke = [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 10n, 13n, 15n, 17n, 19n, 24n];
+  const smoke = [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 13n, 15n, 17n, 24n, 79n];
   const fixed = SMOKE ? smoke : null;
   const count = fixed?.length ?? COUNT;
   const lanes = "interp+cseq+js" + (THREADS > 0 ? "+par" + String(THREADS) : "") + (WITH_METAL ? "+metal" : "") + (WITH_CUDA ? "+cuda" : "");
@@ -3930,7 +3914,7 @@ async function fuzz_run(): Promise<void> {
   const smoke_need = ["qpoly-def", "qpoly-call", "kind-qvar", "kind-meet", "adt-data", "adt-qpoly",
     "erased-field", "erased-param", "f32-arith", "f32-trans", "f32-conv", "nat-table", "peel",
     "array-ops", "map-ops", "string-append", "match-adt", "do-maybe", "do-result", "fork", "bang",
-    "tail-nat", "tail-list", "tail-str", "tail-peano", "tail-adt", "eql", "rwt", "thm", "dep", "ford", "share", "partial", "io-tail",
+    "tail-nat", "tail-list", "tail-str", "tail-adt", "eql", "rwt", "thm", "dep", "ford", "share", "partial", "io-tail",
     "seal-add", "seal-xor", "seal-dist", "seal-mask", "seal-cmp", "seal-rot"];
   const smoke_miss = SMOKE ? smoke_need.filter((f) => feat_tally[f] === undefined) : [];
   if (smoke_miss.length > 0) {
