@@ -74,8 +74,11 @@ show+read roundtrips, `Array` new/get/set/swap/size/clone plus the `a[i]`
 sugar, Map/Set, fork trees with `!` GPU marks, closures and live-1 partial
 application, do-notation (Maybe/Result/IO), equalities, rewrites, minted
 theorems, dependent families (large elimination and the Word idiom). Tail
-loops descend on any recursive data: a Nat, a List, a String, or a minted
-Peano clone that takes the generic ADT path instead of the Nat native.
+loops descend on any chain-shaped data (at most one self field per
+constructor): the program's own such ADTs, base's List at any element
+type, a minted Peano clone that takes the generic ADT path instead of the
+Nat native, a String, or a Nat; the fuel value is synthesized like any
+other, so loops run over data the program already builds.
 
 ## Batching
 

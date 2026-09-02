@@ -100,10 +100,11 @@ built around them:
   Negative float literals do not exist (`-3.5` heads a binder): spell
   `F32.neg(3.5)`.
 - Recursion descends structurally on the FIRST live column (erased
-  columns skipped) — any recursive data serves as the fuel: tail loops
-  draw a Nat, a List, a String or a minted Peano clone; `@unsafe` opts
-  out and is emitted rarely. Partial applications stop at exactly live-1
-  arguments.
+  columns skipped) — any chain adt (at most one self field per
+  constructor) serves as a loop's fuel, the program's own included,
+  beside a Nat or a String; only the Nat kind counts down a masked
+  number, the rest walk synthesized data. `@unsafe` opts out and is
+  emitted rarely. Partial applications stop at exactly live-1 arguments.
 - Plus sugar (`+D<..>`) is lawful only right after `:` (annotation sites);
   after `(` or `&` it parses as a binder. `ty_str` is the safe rendering,
   `ty_top` the annotation-site one. Fun components of `A & B` need parens
