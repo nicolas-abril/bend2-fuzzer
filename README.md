@@ -73,7 +73,9 @@ tables, `String.append`/`cmp`, Char packing, string/list literals, U32/Nat
 show+read roundtrips, `Array` new/get/set/swap/size/clone plus the `a[i]`
 sugar, Map/Set, fork trees with `!` GPU marks, closures and live-1 partial
 application, do-notation (Maybe/Result/IO), equalities, rewrites, minted
-theorems, dependent families (large elimination and the Word idiom).
+theorems, dependent families (large elimination and the Word idiom). Tail
+loops descend on any recursive data: a Nat, a List, a String, or a minted
+Peano clone that takes the generic ADT path instead of the Nat native.
 
 ## Batching
 

@@ -99,9 +99,11 @@ built around them:
   infer: `x = {v : T}`. Do-binds are annotated (`x : T <- act`).
   Negative float literals do not exist (`-3.5` heads a binder): spell
   `F32.neg(3.5)`.
-- Recursion descends structurally on the FIRST live column (Nat fuel
-  first, erased columns skipped); `@unsafe` opts out and is emitted
-  rarely. Partial applications stop at exactly live-1 arguments.
+- Recursion descends structurally on the FIRST live column (erased
+  columns skipped) — any recursive data serves as the fuel: tail loops
+  draw a Nat, a List, a String or a minted Peano clone; `@unsafe` opts
+  out and is emitted rarely. Partial applications stop at exactly live-1
+  arguments.
 - Plus sugar (`+D<..>`) is lawful only right after `:` (annotation sites);
   after `(` or `&` it parses as a binder. `ty_str` is the safe rendering,
   `ty_top` the annotation-site one. Fun components of `A & B` need parens

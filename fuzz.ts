@@ -64,8 +64,9 @@
 //     ("a structural view of a machine word") — never emitted here, though
 //     the JS emitter accepts them (asymmetry is by design, not a finding).
 //   - defs are emitted in creation = dependency order; no forward refs.
-//   - recursion descends structurally on the FIRST live column (Nat fuel
-//     first); @unsafe opts out of descent and is emitted rarely.
+//   - recursion descends structurally on the FIRST live column: a Nat, a
+//     List, a String or a minted Peano clone serves as the fuel; @unsafe
+//     opts out of descent and is emitted rarely.
 //   - non-inferable values in let position ride `x = {v : T}` annotations;
 //     do-binds are annotated (`x : T <- act`); partial applications stop at
 //     exactly live-1 arguments (deeper partials die in js_book).
@@ -1553,9 +1554,29 @@ function tf_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
 
 // Tail loops
 // ----------
-// def tl(+n: Nat, a0: U32, ..) -> U32 — countdown state machines: the
+// def tl(fuel, a0: U32, ..) -> U32 — countdown state machines: the
 // compiled seq machine's bread and butter (WL_SPIN when fused at a cut).
-// Deep peels (case 3n+p) exercise the flattener's Succ chains.
+// The fuel is the first column, descended structurally, and any recursive
+// data type serves: a Nat (native W64 in the compiler; deep peels,
+// case 3n+p, exercise the flattener's Succ chains), a List whose heads
+// feed the step, a String walked by character, or a minted Peano clone
+// that takes the generic ADT path instead of the Nat native.
+
+// peano_ensure : one Peano clone per program, a plain recursive Data
+// type the other kits can build, match and fold like any generated adt
+function peano_ensure(c: Ctx): Adt {
+  const got = c.memo.get("peano");
+  if (got !== undefined) {
+    return c.adts.find((a) => a.name === got) as Adt;
+  }
+  const name = "Pn" + String(c.uid());
+  const a: Adt = { name, qps: [], tps: [], kind: Q2, ctors: [], rec: true };
+  a.ctors.push({ name: name + "z", fields: [] }, { name: name + "s", fields: [{ q: 1, t: { k: "adt", a, qs: [], args: [] } }] });
+  c.push("type " + name + " is Data:\n  " + name + "z{}\n  " + name + "s{p: " + name + "}");
+  c.memo.set("peano", name);
+  c.adts.push(a);
+  return a;
+}
 
 function tail_call(c: Ctx, env: V[], fuel: number): E {
   c.feat("tail");
@@ -1565,22 +1586,55 @@ function tail_call(c: Ctx, env: V[], fuel: number): E {
   const accs = Array.from({ length: naccs }, (_, i) => "a" + String(i));
   const henv: V[] = accs.map((a2) => v_new(a2, U32C, true));
   const base = e_at(num_combine(c, accs.map((a2) => e_atom(a2)).concat([num_lit_u32(c)])));
-  const peel = c.g.chance(0.25) ? 2 + c.g.int(3) : 1;
-  if (peel > 1) {
-    c.feat("peel");
-  }
-  const step = (): string[] => accs.map(() => e_at(num_gen_u32(c, henv.map((v) => ({ ...v })), 1)));
-  let arms: string;
-  if (peel === 1) {
-    arms = "  match n:\n    case 0n:\n      " + base + "\n    case 1n+p:\n      " + name + "(p, " + step().join(", ") + ")";
-  } else {
-    arms = "  match n:\n    case " + String(peel) + "n+p:\n      " + name + "(p, " + step().join(", ") + ")\n    case q:\n      " + base;
-  }
-  const params = ["+n: Nat"].concat(accs.map((a2) => "+" + a2 + ": U32"));
-  c.push("def " + name + "(" + params.join(", ") + ") -> U32:\n" + arms);
+  const step = (extra: V[]): string => accs.map(() => e_at(num_gen_u32(c, henv.concat(extra).map((v) => ({ ...v })), 1))).join(", ");
   const iters = c.pure ? 2 + c.g.int(size_pick(c, 90, 900)) : size_pick(c, 200 + c.g.int(4000), 200000);
-  c.defr.push({ name, qps: [], tps: [], ps: params.map((_, i) => ({ q: 2 as BQ, t: i === 0 ? NATC : U32C })), ret: U32C, mask: [iters, ...accs.map(() => null)] });
-  const fuelArg = "U32.to_nat(" + e_at(num_gen_u32(c, env, 1)) + " % " + String(iters) + ")";
+  const kind = c.g.wpick<string>([[5, "nat"], [3, "list"], [2, "str"], [2, "peano"]]);
+  c.feat("tail-" + kind);
+  let fuelP: string;
+  let fuelT: T;
+  let arms: string;
+  let fuelArg: string;
+  let mask: number | null = null;
+  if (kind === "nat") {
+    const peel = c.g.chance(0.25) ? 2 + c.g.int(3) : 1;
+    if (peel > 1) {
+      c.feat("peel");
+    }
+    fuelP = "+n: Nat";
+    fuelT = NATC;
+    arms = peel === 1
+      ? "  match n:\n    case 0n:\n      " + base + "\n    case 1n+p:\n      " + name + "(p, " + step([]) + ")"
+      : "  match n:\n    case " + String(peel) + "n+p:\n      " + name + "(p, " + step([]) + ")\n    case q:\n      " + base;
+    mask = iters;
+    fuelArg = "U32.to_nat(" + e_at(num_gen_u32(c, env, 1)) + " % " + String(iters) + ")";
+  } else if (kind === "list") {
+    fuelP = "+l: List<&2, U32>";
+    fuelT = t_list(Q2, U32C);
+    arms = "  match l:\n    case Nil{}:\n      " + base + "\n    case Con{h, t}:\n      " + name + "(t, " + step([v_new("h", U32C, true)]) + ")";
+    const els: string[] = [];
+    for (let i = 0, n = size_pick(c, c.g.int(9), c.pure ? 60 : 1500); i < n; i++) {
+      els.push(e_at(num_gen_u32(c, env, 0)));
+    }
+    fuelArg = "[" + els.join(", ") + "]";
+  } else if (kind === "str") {
+    fuelP = "+s: String";
+    fuelT = STRC;
+    arms = "  match s:\n    case SNil{}:\n      " + base + "\n    case SCon{h, t}:\n      +hc = " + helper_chr(c) + "(h)\n      "
+      + name + "(t, " + step([v_new("hc", U32C, true)]) + ")";
+    fuelArg = str_lit(c, size_pick(c, c.g.int(9), c.pure ? 160 : 2000));
+  } else {
+    const pn = peano_ensure(c);
+    const from = helper(c, "peano_from", "pf", (c2, n) => "def " + n + "(+k: Nat) -> " + pn.name + ":\n  match k:\n    case 0n:\n      "
+      + pn.name + "z{}\n    case 1n+p:\n      " + pn.name + "s{" + n + "(p)}");
+    fuelP = "+n: " + pn.name;
+    fuelT = { k: "adt", a: pn, qs: [], args: [] };
+    arms = "  match n:\n    case " + pn.name + "z{}:\n      " + base + "\n    case " + pn.name + "s{p}:\n      " + name + "(p, " + step([]) + ")";
+    mask = iters;
+    fuelArg = from + "(U32.to_nat(" + e_at(num_gen_u32(c, env, 1)) + " % " + String(iters) + "))";
+  }
+  c.push("def " + name + "(" + [fuelP].concat(accs.map((a2) => "+" + a2 + ": U32")).join(", ") + ") -> U32:\n" + arms);
+  const ps: Array<{ q: BQ; t: T }> = [{ q: 2 as BQ, t: fuelT }, ...accs.map((): { q: BQ; t: T } => ({ q: 2, t: U32C }))];
+  c.defr.push({ name, qps: [], tps: [], ps, ret: U32C, mask: [mask, ...accs.map(() => null)] });
   const args = accs.map(() => e_at(num_gen_u32(c, env, Math.min(fuel - 1, 1))));
   return e_call(name, name + "(" + [fuelArg].concat(args).join(", ") + ")");
 }
@@ -3786,7 +3840,7 @@ async function fuzz_run(): Promise<void> {
   }
   // smoke : hand-verified per-feature cover (re-pick after any edit that
   // remaps seeds: each seed passes solo and the union covers smoke_need)
-  const smoke = [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 13n, 15n, 17n, 24n, 79n];
+  const smoke = [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 13n, 15n, 17n, 19n, 24n, 79n];
   const fixed = SMOKE ? smoke : null;
   const count = fixed?.length ?? COUNT;
   const lanes = "interp+cseq+js" + (THREADS > 0 ? "+par" + String(THREADS) : "") + (WITH_METAL ? "+metal" : "") + (WITH_CUDA ? "+cuda" : "");
@@ -3855,7 +3909,7 @@ async function fuzz_run(): Promise<void> {
   const smoke_need = ["qpoly-def", "qpoly-call", "kind-qvar", "kind-meet", "adt-data", "adt-qpoly",
     "erased-field", "erased-param", "f32-arith", "f32-trans", "f32-conv", "nat-table", "peel",
     "array-ops", "map-ops", "string-append", "match-adt", "do-maybe", "do-result", "fork", "bang",
-    "tail", "eql", "rwt", "thm", "dep", "ford", "share", "partial", "io-tail",
+    "tail-nat", "tail-list", "tail-str", "tail-peano", "eql", "rwt", "thm", "dep", "ford", "share", "partial", "io-tail",
     "seal-add", "seal-xor", "seal-dist", "seal-mask", "seal-cmp", "seal-rot"];
   const smoke_miss = SMOKE ? smoke_need.filter((f) => feat_tally[f] === undefined) : [];
   if (smoke_miss.length > 0) {
