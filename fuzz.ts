@@ -2017,9 +2017,12 @@ function match_adt_def(c: Ctx, env: V[], fuel: number): E | null {
   const scrMany = ty_data(t) && c.g.chance(0.3);
   const rows = a.ctors.map((ct) => {
     const { pat, vs } = adt_row(c, t, ct, scrMany);
-    // nested match on a matchable field, else a fold
-    const nest = vs.find((v) => (v.ty.k === "bool" || v.ty.k === "nat" || v.ty.k === "cmp") && c.g.chance(0.3));
-    if (nest !== undefined && nest.ty.k === "bool") {
+    // nested match on the LAST bound field when it is a Bool (a nested
+    // scrutinee must be the pattern's last binder), else a fold
+    const last = ct.fields[ct.fields.length - 1];
+    const nest = last !== undefined && last.q !== 0 && vs[vs.length - 1]?.ty.k === "bool" && c.g.chance(0.3)
+      ? vs[vs.length - 1] : undefined;
+    if (nest !== undefined) {
       c.feat("match-nest");
       const rest = vs.filter((v) => v !== nest);
       const arm = (): string => e_at(num_combine(c, rest.filter((v) => v.ty.k === "u32").map((v) => e_atom(v.name)).concat([num_lit_u32(c)])));
