@@ -71,8 +71,10 @@
 //   - non-inferable values in let position ride `x = {v : T}` annotations;
 //     do-binds are annotated (`x : T <- act`); partial applications stop at
 //     exactly live-1 arguments (deeper partials die in js_book).
-//   - infix ops: + - * / % .&. .|. .^. << >> (Nat rhs!) <= >= > && ||
-//     +. -. *. /. %. ==. !=. <. <=. >. >=. ++ +n — there is no U32 <, ==
+//   - an operator is a method named by the frame around it, "(a + b : T)"
+//     being T.add: + - * / % .&. .|. .^. << >> (Nat rhs!) <= >= > at U32,
+//     Nat (+ only) and F32; && || ++ are fixed. e_bin spells the frame
+//     from the op's family tag ("+n" Nat, "+." F32). There is no <, ==
 //     or != infix; those are calls folded through a minted Bool reader.
 //
 // Primitives with special compilation (comp.ts OPERATIONS/OPTIMIZED and
@@ -346,17 +348,13 @@ class Gen {
 // object grammar and mixed levels would mis-parse otherwise); statement-head
 // positions may stay bare.
 
-const PREC: Record<string, number> = {
-  "||": 2, "&&": 3,
-  "<=": 4, ">=": 4, ">": 4,
-  "==.": 4, "!=.": 4, "<.": 4, "<=.": 4, ">.": 4, ">=.": 4,
-  "++": 5, "+n": 10,
-  ".|.": 6, ".^.": 7, ".&.": 8,
-  "<<": 9, ">>": 9,
-  "+": 10, "-": 10,
-  "*": 11, "/": 11, "%": 11,
-  "+.": 10, "-.": 10, "*.": 11, "/.": 11, "%.": 11,
-};
+const PREC: Record<string, number> = { "||": 2, "&&": 3, "++": 5 };
+
+// An operator is a method named by the ": T" frame around it: "+n" is
+// Nat's add, a dotted op ("+.", "<=.") is F32's, the rest are U32's.
+// F32's ==. !=. <. have no infix (only <= >= > ride one) and become
+// calls. The frame's parens make every op expression an atom.
+const F32_CALLS: Record<string, string> = { "==.": "is_eq", "!=.": "is_ne", "<.": "is_lt" };
 
 type E = { s: string; p: number; head?: string };
 
@@ -368,7 +366,16 @@ function e_at(e: E): string {
 }
 
 function e_bin(l: E, op: string, r: E): E {
-  return { s: e_at(l) + " " + op + " " + e_at(r), p: PREC[op] };
+  if (op in PREC) {
+    return { s: e_at(l) + " " + op + " " + e_at(r), p: PREC[op] };
+  }
+  if (op in F32_CALLS) {
+    return e_fn("F32." + F32_CALLS[op], l, r);
+  }
+  const f32 = op.endsWith(".") && !op.startsWith(".");
+  const ty = op === "+n" ? "Nat" : f32 ? "F32" : "U32";
+  const o = op === "+n" ? "+" : f32 ? op.slice(0, -1) : op;
+  return e_atom("(" + e_at(l) + " " + o + " " + e_at(r) + " : " + ty + ")");
 }
 
 function e_fn(op: string, ...xs: E[]): E {
@@ -918,7 +925,7 @@ function helper_chr(c: Ctx): string {
 // elimination and Char packing)
 function helper_strlen(c: Ctx): string {
   return helper(c, "strlen", "sl", (c, n) => "def " + n + "(s: String, +acc: U32) -> U32:\n  match s:\n    case SNil{}:\n      acc\n    case SCon{h, t}:\n      "
-    + n + "(t, (acc * 31 + " + helper_chr(c) + "(h)))");
+    + n + "(t, (acc * 31 + " + helper_chr(c) + "(h) : U32))");
 }
 
 // helper_may / helper_maynat : Maybe<&2, U32|Nat> -> U32 (show/read roundtrips)
@@ -1378,31 +1385,31 @@ function rd_ensure(c: Ctx, t: T): string {
   const def1 = (param: string, body: string): string => "def " + name + "(" + param + ") -> U32:\n  " + body;
   const src = ((): string => {
     switch (t.k) {
-      case "u32": return def1("x: U32", "x + " + salt());
-      case "f32": return def1("x: F32", c.pure ? salt() : "F32.to_u32(x *. " + num_lit_f32(c, false).s + ")");
-      case "nat": return def1("x: Nat", "U32.from_nat(x) + " + salt());
-      case "bool": return def1("x: Bool", helper_bool(c) + "(x) + " + salt());
-      case "cmp": return def1("x: Cmp", helper_cmp(c) + "(x) * " + String(1 + c.g.int(9)));
-      case "char": return def1("x: Char", helper_chr(c) + "(x) + " + salt());
+      case "u32": return def1("x: U32", "(x + " + salt() + " : U32)");
+      case "f32": return def1("x: F32", c.pure ? salt() : "F32.to_u32((x * " + num_lit_f32(c, false).s + " : F32))");
+      case "nat": return def1("x: Nat", "(U32.from_nat(x) + " + salt() + " : U32)");
+      case "bool": return def1("x: Bool", "(" + helper_bool(c) + "(x) + " + salt() + " : U32)");
+      case "cmp": return def1("x: Cmp", "(" + helper_cmp(c) + "(x) * " + String(1 + c.g.int(9)) + " : U32)");
+      case "char": return def1("x: Char", "(" + helper_chr(c) + "(x) + " + salt() + " : U32)");
       case "str": return def1("x: String", helper_strlen(c) + "(x, " + salt() + ")");
       case "unit": return def1("x: Unit", "match x:\n    case Unit{}:\n      " + salt());
       case "tup": {
         const ra = rd_ensure(c, t.a);
         const rb = rd_ensure(c, t.b);
-        return def1("x: " + ty_str(t), "(ta, tb) = x\n  " + ra + "(ta) + " + rb + "(tb)");
+        return def1("x: " + ty_str(t), "(ta, tb) = x\n  (" + ra + "(ta) + " + rb + "(tb) : U32)");
       }
       case "fun": {
         const app = "f(" + e_at(syn(c, t.dom, [], 1)) + ")";
         const rc = t.cod.k === "u32" ? null : rd_ensure(c, t.cod);
-        return def1("f: " + ty_grp(t), rc === null ? app + " + " + salt() : rc + "(" + app + ")");
+        return def1("f: " + ty_grp(t), rc === null ? "(" + app + " + " + salt() + " : U32)" : rc + "(" + app + ")");
       }
       case "map": {
         const rv = rd_ensure(c, t.v);
         const sl = helper_strlen(c);
         return def1("m: Map<" + qt_str(t.q) + ", " + ty_grp(t.v) + ">", "match m:\n"
           + "    case MTip{}:\n      " + salt() + "\n"
-          + "    case MLeaf{key, val}:\n      " + sl + "(key, 3) + " + rv + "(val)\n"
-          + "    case MNode{pos, lo, hi}:\n      U32.from_nat(pos) + " + name + "(lo) + " + name + "(hi)");
+          + "    case MLeaf{key, val}:\n      (" + sl + "(key, 3) + " + rv + "(val) : U32)\n"
+          + "    case MNode{pos, lo, hi}:\n      (U32.from_nat(pos) + " + name + "(lo) + " + name + "(hi) : U32)");
       }
       case "adt": return rd_adt(c, name, t);
       default: return def1("x: " + ty_str(t), salt());
@@ -1485,7 +1492,7 @@ function builder_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
     c.push("def " + name + "(+n: Nat, +s: U32) -> " + ty_str(t) + ":\n  " + brow);
   } else {
     c.push("def " + name + "(+n: Nat, +s: U32) -> " + ty_str(t) + ":\n  match n:\n    case 0n:\n      "
-      + brow + "\n    case 1n+p:\n      " + rec.name + "{" + fld(rec, name + "(p, (s * 3 + 7))").join(", ") + "}");
+      + brow + "\n    case 1n+p:\n      " + rec.name + "{" + fld(rec, name + "(p, (s * 3 + 7 : U32))").join(", ") + "}");
   }
   c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: NATC }, { q: 2, t: U32C }], ret: t, mask: [8 + c.g.int(8), null] });
   return name;
@@ -1496,7 +1503,7 @@ function builder_call(c: Ctx, t: Extract<T, { k: "adt" }>, env: V[], cap: number
   const name = builder_ensure(c, t);
   const reg = c.defr.find((d) => d.name === name);
   const depth = Math.min(reg?.mask?.[0] ?? 8, cap);
-  const fuel = "U32.to_nat(" + e_at(num_gen_u32(c, env, 1)) + " % " + String(Math.max(2, depth)) + ")";
+  const fuel = "U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % " + String(Math.max(2, depth)) + " : U32))";
   return e_call(name, name + "(" + fuel + ", " + e_at(num_gen_u32(c, env, 0)) + ")");
 }
 
@@ -1603,7 +1610,7 @@ function tail_call(c: Ctx, env: V[], fuel: number): E {
       ? "  match n:\n    case 0n:\n      " + base + "\n    case 1n+p:\n      " + name + "(p, " + step([]) + ")"
       : "  match n:\n    case " + String(peel) + "n+p:\n      " + name + "(p, " + step([]) + ")\n    case q:\n      " + base;
     mask = iters;
-    fuelArg = "U32.to_nat(" + e_at(num_gen_u32(c, env, 1)) + " % " + String(iters) + ")";
+    fuelArg = "U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % " + String(iters) + " : U32))";
   } else if (kind === "str") {
     fuelP = "n: String";
     fuelT = STRC;
@@ -1837,7 +1844,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
 function syn_def_arg(c: Ctx, d: DefR, i: number, t: T, env: V[], fuel: number): string {
   const mask = d.mask?.[i] ?? null;
   if (mask !== null && t.k === "nat") {
-    return "U32.to_nat(" + e_at(num_gen_u32(c, env, fuel)) + " % " + String(mask) + ")";
+    return "U32.to_nat((" + e_at(num_gen_u32(c, env, fuel)) + " % " + String(mask) + " : U32))";
   }
   const fenv = d.ps[i].q === 1 ? env : env.filter((v) => v.q === "many");
   const e = syn(c, t, fenv, fuel);
@@ -1931,7 +1938,7 @@ function syn_mint_def(c: Ctx, goal: T, env: V[]): E | null {
   const split = c.g.chance(0.2);
   if (split) {
     c.feat("assert-def");
-    c.push("assert " + name + ":\n" + ps.map((p, i) => "  forall " + bq_prefix(p.q) + "p" + String(i) + ": " + ty_top(p.t)).join("\n")
+    c.push("law " + name + ":\n" + ps.map((p, i) => "  for " + bq_prefix(p.q) + "p" + String(i) + ": " + ty_top(p.t)).join("\n")
       + "\n  " + ty_top(goal) + "\n\ndef " + name + "(" + ps.map((_, i) => "p" + String(i)).join(", ") + "):\n  " + e_at(body));
   } else {
     const unsafe = c.g.chance(0.06);
@@ -1966,7 +1973,7 @@ function generic_mint(c: Ctx): void {
     // structural length over List<a, A>, dropping elements (affine)
     const lt: T = t_list(qv(qps[0]), tA);
     c.push("def " + name + "(" + qps[0] + ", -A: Kind(" + qps[0] + "), l: " + ty_str(lt) + ", +acc: U32) -> U32:\n"
-      + "  match l:\n    case Nil{}:\n      acc\n    case Con{h, t}:\n      " + name + "(" + qps[0] + ", A, t, acc + " + String(1 + c.g.int(9)) + ")");
+      + "  match l:\n    case Nil{}:\n      acc\n    case Con{h, t}:\n      " + name + "(" + qps[0] + ", A, t, (acc + " + String(1 + c.g.int(9)) + " : U32))");
     c.defr.push({ name, qps: [qps[0]], tps: [{ n: "A", q: qv(qps[0]) }], ps: [{ q: 1, t: lt }, { q: 2, t: U32C }], ret: U32C });
     return;
   }
@@ -2021,17 +2028,17 @@ function match_nat_def(c: Ctx, env: V[], fuel: number): E {
   } else if (style === "peel") {
     const k = 2 + c.g.int(4);
     c.feat("peel");
-    body = "  match n:\n    case " + String(k) + "n+p:\n      U32.from_nat(p) + " + String(c.g.int(64))
-      + "\n    case q:\n      U32.from_nat(q) * " + String(2 + c.g.int(9));
+    body = "  match n:\n    case " + String(k) + "n+p:\n      (U32.from_nat(p) + " + String(c.g.int(64)) + " : U32)"
+      + "\n    case q:\n      (U32.from_nat(q) * " + String(2 + c.g.int(9)) + " : U32)";
   } else {
     c.feat("match-nest");
     body = "  match n:\n    case 0n:\n      " + String(c.g.int(64))
       + "\n    case 1n+p:\n      match p:\n        case 0n:\n          " + String(c.g.int(64))
-      + "\n        case 1n+q:\n          U32.from_nat(q) + " + String(c.g.int(64));
+      + "\n        case 1n+q:\n          (U32.from_nat(q) + " + String(c.g.int(64)) + " : U32)";
   }
   c.push("def " + name + "(n: Nat) -> U32:\n" + body);
   c.defr.push({ name, qps: [], tps: [], ps: [{ q: 1, t: NATC }], ret: U32C, mask: [64] });
-  return e_call(name, name + "(U32.to_nat(" + e_at(num_gen_u32(c, env, Math.min(fuel, 1))) + " % 64))");
+  return e_call(name, name + "(U32.to_nat((" + e_at(num_gen_u32(c, env, Math.min(fuel, 1))) + " % 64 : U32)))");
 }
 
 function match_bool_def(c: Ctx, env: V[], fuel: number): E {
@@ -2138,7 +2145,7 @@ function match_char_def(c: Ctx, env: V[]): E {
   const name = "cv" + String(c.uid());
   const c1 = str_char(c);
   const bif = "cq" + String(c.uid());
-  c.push("def " + bif + "(z: Bool, +n: U32) -> U32:\n  match z:\n    case False{}:\n      n + " + String(c.g.int(99))
+  c.push("def " + bif + "(z: Bool, +n: U32) -> U32:\n  match z:\n    case False{}:\n      (n + " + String(c.g.int(99)) + " : U32)"
     + "\n    case True{}:\n      " + e_at(num_gen_u32(c, [], 1)));
   c.push("def " + name + "(c: Char) -> U32:\n  Chr{n} = c\n  +n2 = n\n  " + bif + "(U32.is_eq(n2, " + String(c1.charCodeAt(0)) + "), n2)");
   c.defr.push({ name, qps: [], tps: [], ps: [{ q: 1, t: CHARC }], ret: U32C });
@@ -2173,10 +2180,10 @@ function do_call_def(c: Ctx, env: V[], fuel: number): E {
   const rt = "Result<&1, &1, String, U32>";
   const fail = c.g.chance(0.3);
   const mid = fail
-    ? y + " : U32 <- Result.fail(&1, &1, String, U32, " + str_lit(c, 3) + ")"
+    ? y + " : U32 <- Fail{" + str_lit(c, 3) + "}"
     : y + " : U32 <- Result.pure(&1, &1, String, U32, " + e_at(num_gen_u32(c, henv.concat([v_new(x, U32C)]), 1)) + ")";
   c.push("def " + name + "(+k: U32) -> " + rt + ":\n  do Result<&1, &1, String, U32>:\n    "
-    + x + " : U32 <- Done{k + 1}\n    " + mid + "\n    "
+    + x + " : U32 <- Done{(k + 1 : U32)}\n    " + mid + "\n    "
     + "return " + e_at(num_combine(c, [e_atom(y), num_gen_u32(c, henv, 0)])));
   const un = "ur" + id;
   const sl = helper_strlen(c);
@@ -2310,20 +2317,20 @@ function let_array(c: Ctx, env: V[]): Line {
     if (clone) {
       c.feat("array-clone");
       const k3 = "ac" + id;
-      c.push("def " + k3 + "(r: Array<U32> & U32, +n: U32) -> U32:\n  (a4, w) = r\n  w + n");
+      c.push("def " + k3 + "(r: Array<U32> & U32, +n: U32) -> U32:\n  (a4, w) = r\n  (w + n : U32)");
       c.push("def " + k2 + "b(r: Array<U32> & U32, c: Array<U32>) -> U32:\n  (a3, n) = r\n  +n2 = n\n  " + k3 + "(Array.get(U32, c, n2), n2)");
       c.push("def " + k2 + "(r: Array<U32> & Array<U32>) -> U32:\n  (b2, c2) = r\n  " + k2 + "b(Array.size(U32, b2), c2)");
     } else {
-      c.push("def " + k2 + "(r: Array<U32> & U32) -> U32:\n  (a2, n) = r\n  n + " + String(c.g.int(64)));
+      c.push("def " + k2 + "(r: Array<U32> & U32) -> U32:\n  (a2, n) = r\n  (n + " + String(c.g.int(64)) + " : U32)");
     }
     const k2call = clone
-      ? (a: string): string => k2 + "(Array.clone(" + a + "))"
+      ? (a: string): string => k2 + "(Array.clone(U32, " + a + "))"
       : (a: string): string => k2 + "(Array.size(U32, " + a + "))";
-    c.push("def " + k1 + "(r: Array<U32> & U32, +i: U32) -> U32:\n  (a1, old) = r\n  old + " + k2call("a1"));
+    c.push("def " + k1 + "(r: Array<U32> & U32, +i: U32) -> U32:\n  (a1, old) = r\n  (old + " + k2call("a1") + " : U32)");
     c.push("def " + name + "(+i: U32, +s: U32) -> U32:\n"
       + "  a0 = Array.new(U32, " + String(depth) + "n, s)\n"
-      + "  a1 = a0[i] <- (s * 3 + 1)\n"
-      + "  " + k1 + "(Array.swap(U32, a1, (i + 1), (s .^. 255)), i)");
+      + "  a1 = a0[i] <- (s * 3 + 1 : U32)\n"
+      + "  " + k1 + "(Array.swap(U32, a1, (i + 1 : U32), (s .^. 255 : U32)), i)");
     c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: U32C }, { q: 2, t: U32C }], ret: U32C });
     const keep = bind_keep(c);
     return {
@@ -2344,7 +2351,7 @@ function let_array(c: Ctx, env: V[]): Line {
   c.push("def " + name + "(+i: U32) -> U32:\n"
     + "  a0 = Array.new(" + ty_grp(elT) + ", " + String(depth) + "n, " + dv + ")\n"
     + "  a1 = Array.set(" + ty_grp(elT) + ", a0, i, " + e_at(syn(c, elT, [], 1)) + ")\n"
-    + "  " + k1 + "(Array.swap(" + ty_grp(elT) + ", a1, (i + 3), " + e_at(syn(c, elT, [], 1)) + "))");
+    + "  " + k1 + "(Array.swap(" + ty_grp(elT) + ", a1, (i + 3 : U32), " + e_at(syn(c, elT, [], 1)) + "))");
   c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: U32C }], ret: U32C });
   const keep = bind_keep(c);
   return {
@@ -2378,23 +2385,23 @@ function let_map(c: Ctx, _env: V[]): Line {
   const lines: string[] = [];
   if (style === "has") {
     const k1 = "mh" + id;
-    c.push("def " + k1 + "(r: Map<" + qs + ", " + vs + "> & Bool) -> U32:\n  (m2, b) = r\n  " + helper_bool(c) + "(b) + " + rdM + "(m2)");
+    c.push("def " + k1 + "(r: Map<" + qs + ", " + vs + "> & Bool) -> U32:\n  (m2, b) = r\n  (" + helper_bool(c) + "(b) + " + rdM + "(m2) : U32)");
     lines.push(x + " = " + k1 + "(Map.has(" + qs + ", " + vs + ", " + acc + ", " + c.g.pick(keys) + "))");
   } else if (style === "pop") {
     const k1 = "mp" + id;
     const mayT: T = { k: "adt", a: BASE.Maybe, qs: [q], args: [vT] };
     const rdMay = rd_ensure(c, mayT);
-    c.push("def " + k1 + "(r: Map<" + qs + ", " + vs + "> & " + ty_str(mayT) + ") -> U32:\n  (m2, got) = r\n  " + rdMay + "(got) + " + rdM + "(m2)");
+    c.push("def " + k1 + "(r: Map<" + qs + ", " + vs + "> & " + ty_str(mayT) + ") -> U32:\n  (m2, got) = r\n  (" + rdMay + "(got) + " + rdM + "(m2) : U32)");
     lines.push(x + " = " + k1 + "(Map.pop(" + qs + ", " + vs + ", " + acc + ", " + (c.g.chance(0.5) ? c.g.pick(keys) : str_lit(c, 3)) + "))");
   } else if (style === "get") {
     c.feat("set-ops");
     const k1 = "mg" + id;
-    c.push("def " + k1 + "(r: Map<&2, U32> & U32) -> U32:\n  (m2, v) = r\n  v + " + rdM + "(m2)");
+    c.push("def " + k1 + "(r: Map<&2, U32> & U32) -> U32:\n  (m2, v) = r\n  (v + " + rdM + "(m2) : U32)");
     lines.push(x + " = " + k1 + "(Map.get(U32, " + num_lit_u32(c).s + ", " + acc + ", " + c.g.pick(keys) + "))");
   } else if (style === "set-kit") {
     c.feat("set-ops");
     const k1 = "ms" + id;
-    c.push("def " + k1 + "(r: Set() & Bool) -> U32:\n  (s2, b) = r\n  " + helper_bool(c) + "(b) + " + String(c.g.int(64)));
+    c.push("def " + k1 + "(r: Set() & Bool) -> U32:\n  (s2, b) = r\n  (" + helper_bool(c) + "(b) + " + String(c.g.int(64)) + " : U32)");
     let sacc = "Set.new()";
     for (const k of keys.slice(0, 3)) {
       sacc = "Set.add(" + sacc + ", " + k + ")";
@@ -2424,7 +2431,7 @@ function batch_ensure(c: Ctx): string {
   c = c.sub("batch");
   const leaf = e_at(num_combine(c, [e_bin(e_bin(e_atom("i"), "*", e_atom("2654435761")), ".&.", e_atom("8191")), num_gen_u32(c, [v_new("i", U32C, true)], 1)]));
   c.push("def " + name + "(+d: Nat, +i: U32) -> U32:\n  match d:\n    case 0n:\n      " + leaf
-    + "\n    case 1n+q:\n      a b = " + name + "(q, (i * 2)) " + name + "(q, (i * 2 + 1))\n      "
+    + "\n    case 1n+q:\n      a b = " + name + "(q, (i * 2 : U32)) " + name + "(q, (i * 2 + 1 : U32))\n      "
     + e_at(num_combine(c, [e_atom("a"), e_atom("b")])));
   return name;
 }
@@ -2492,14 +2499,14 @@ function let_shared(c: Ctx, env: V[]): Line {
     const lines = [
       "+" + s + " = {" + syn(c, inst, env, 2).s + " : " + ty_str(inst) + "}",
       x + " = " + us + "(" + s + ", " + e_at(num_gen_u32(c, env, 1)) + ")",
-      y + " = " + rdp + "(" + s + ") + " + x,
+      y + " = (" + rdp + "(" + s + ") + " + x + " : U32)",
     ];
     return { text: lines.join("\n  "), binds: [y], vars: [] };
   }
   const lines = [
     "+" + s + " = " + u32_rhs(num_gen_u32(c, env, 2)),
     x + " = " + e_at(num_combine(c, [e_atom(s), e_atom(s), num_gen_u32(c, env, 1)])),
-    y + " = " + s + " + " + x,
+    y + " = (" + s + " + " + x + " : U32)",
   ];
   return { text: lines.join("\n  "), binds: [y], vars: [] };
 }
@@ -2527,13 +2534,13 @@ function let_dep(c: Ctx, env: V[]): Line {
   const rdl = left.k === "u32" ? null : rd_ensure(c, left);
   const rdr = right.k === "u32" ? null : rd_ensure(c, right);
   c.push("def " + hop + "(k: Nat, v: " + fam + "(k)) -> U32:\n  match k:\n    case 0n:\n      "
-    + (rdl === null ? "v + 1" : rdl + "(v)") + "\n    case 1n+q:\n      " + (rdr === null ? "v * 2" : rdr + "(v)"));
+    + (rdl === null ? "(v + 1 : U32)" : rdl + "(v)") + "\n    case 1n+q:\n      " + (rdr === null ? "(v * 2 : U32)" : rdr + "(v)"));
   const use = "ud" + id;
   c.push("def " + use + "(+n: Nat) -> U32:\n  " + hop + "(n, " + pick + "(n))");
   c.defr.push({ name: use, qps: [], tps: [], ps: [{ q: 2, t: NATC }], ret: U32C, mask: [4] });
   const x = "v" + String(c.uid());
   return {
-    text: x + " = " + use + "(U32.to_nat(" + e_at(num_gen_u32(c, env, 1)) + " % 4))",
+    text: x + " = " + use + "(U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % 4 : U32)))",
     binds: [x], vars: [],
   };
 }
@@ -2553,7 +2560,7 @@ function let_ford(c: Ctx, env: V[]): Line {
   c.push("type " + N + " is Data:\n  " + Z + "{}\n  " + S + "{p: " + N + "}");
   const V0 = "Fv" + id;
   const P = c.g.pick([U32C, BOOLC]);
-  c.push("assert " + V0 + ":\n  forall n: " + N + "\n  Data");
+  c.push("law " + V0 + ":\n  for n: " + N + "\n  Data");
   c.push("type " + V0 + ".Nil is Data:\n  " + V0 + "n{}");
   c.push("type " + V0 + ".Con<-p: " + N + "> is Data:\n  " + V0 + "c{head: " + ty_str(P) + ", tail: " + V0 + "(p)}");
   c.push("def " + V0 + "(n):\n  match n:\n    case " + Z + "{}:\n      " + V0 + ".Nil\n    case " + S + "{p}:\n      " + V0 + ".Con<p>");
@@ -2561,20 +2568,19 @@ function let_ford(c: Ctx, env: V[]): Line {
   c.push("def " + toN + "(k: Nat) -> " + N + ":\n  match k:\n    case 0n:\n      " + Z + "{}\n    case 1n+p:\n      " + S + "{" + toN + "(p)}");
   const bld = "fb" + id;
   c.push("def " + bld + "(n: " + N + ", +s: U32) -> " + V0 + "(n):\n  match n:\n    case " + Z + "{}:\n      " + V0 + "n{}\n    case " + S + "{p}:\n      "
-    + V0 + "c{" + (P.k === "u32" ? "s" : "U32.is_gt(s, 4)") + ", " + bld + "(p, (s + 3))}");
+    + V0 + "c{" + (P.k === "u32" ? "s" : "U32.is_gt(s, 4)") + ", " + bld + "(p, (s + 3 : U32))}");
   const rdP = P.k === "u32" ? null : helper_bool(c);
   const eat = "fe" + id;
   c.push("def " + eat + "(n: " + N + ", v: " + V0 + "(n), +acc: U32) -> U32:\n  match n:\n    case " + Z + "{}:\n      acc\n    case " + S + "{p}:\n      match v:\n        case " + V0 + "c{h, t}:\n          "
-    + eat + "(p, t, (acc + " + (rdP === null ? "h" : rdP + "(h)") + "))");
+    + eat + "(p, t, (acc + " + (rdP === null ? "h" : rdP + "(h)") + " : U32))");
   // hole-motive transport: cast across a proved index equation
   const cast = "fc" + id;
   c.push("def " + cast + "(-m: " + N + ", -n: " + N + ", e: {m == n : " + N + "}, w: " + V0 + "(m)) -> " + V0 + "(n):\n  %e : " + V0 + "(_); w");
   const use = "fu" + id;
   // n is consumed twice (eat and bld): copy through a + binder; the cast
   // — the identity transport across the reflexive index equation — rides
-  // a coin: its Word.cast shape (%e : F(_); w) is a live compiler-bug
-  // class today (repros/comp_rwt_cast_body.bend), and the coin keeps the
-  // cast-free spelling reaching the compiled legs while it stands
+  // a coin so both spellings reach the compiled legs (its Word.cast shape
+  // (%e : F(_); w) was a compiler-crash class once, reg_rwt_carb_binders)
   const casted = c.g.chance(0.5);
   if (casted) {
     c.feat("ford-cast");
@@ -2584,7 +2590,7 @@ function let_ford(c: Ctx, env: V[]): Line {
   c.defr.push({ name: use, qps: [], tps: [], ps: [{ q: 1, t: NATC }, { q: 2, t: U32C }], ret: U32C, mask: [c.pure ? 12 : 40, null] });
   const x = "v" + String(c.uid());
   return {
-    text: x + " = " + use + "(U32.to_nat(" + e_at(num_gen_u32(c, env, 1)) + " % " + String(c.pure ? 12 : 40) + "), " + e_at(num_gen_u32(c, env, 1)) + ")",
+    text: x + " = " + use + "(U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % " + String(c.pure ? 12 : 40) + " : U32)), " + e_at(num_gen_u32(c, env, 1)) + ")",
     binds: [x], vars: [],
   };
 }
@@ -2630,7 +2636,7 @@ function let_value(c: Ctx, env: V[]): Line {
     lines.push((ykeep ? "+" : "") + y + " = " + rd + "(" + tf_ensure(c, t as Extract<T, { k: "adt" }>) + "(" + x + "))");
   } else if (kind === "twice") {
     c.feat("dup");
-    lines.push((ykeep ? "+" : "") + y + " = " + rd + "(" + x + ") + " + rd + "(" + x + ")");
+    lines.push((ykeep ? "+" : "") + y + " = (" + rd + "(" + x + ") + " + rd + "(" + x + ") : U32)");
   } else {
     lines.push((ykeep ? "+" : "") + y + " = " + rd + "(" + x + ")");
   }
@@ -2673,7 +2679,7 @@ function hof_call(c: Ctx, env: V[]): E {
   c.push("def " + name + "(+a: U32, +b: U32, c: U32) -> U32:\n  " + e_at(num_combine(c, [e_atom("a"), e_atom("b"), e_atom("c"), num_lit_u32(c)])));
   c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: U32C }, { q: 2, t: U32C }, { q: 1, t: U32C }], ret: U32C });
   const hf = "hg" + id;
-  c.push("def " + hf + "(f: U32 -> U32, +x: U32) -> U32:\n  f(x) + x");
+  c.push("def " + hf + "(f: U32 -> U32, +x: U32) -> U32:\n  (f(x) + x : U32)");
   c.defr.push({ name: hf, qps: [], tps: [], ps: [{ q: 1, t: { k: "fun", q: 1, dom: U32C, cod: U32C } }, { q: 2, t: U32C }], ret: U32C });
   if (c.g.chance(0.5)) {
     c.feat("partial");
@@ -2761,7 +2767,7 @@ function io_tail(c: Ctx, seed: bigint): IoTail {
     const rk = "fr" + id;
     c.push("def " + rk + "(fr: File & Result<&1, &1, U32 & String, String>) -> IO(U32):\n"
       + "  (f, r) = fr\n  match r:\n    case Done{s}:\n      do IO<U32>:\n        u : Unit <- File.close(f)\n        IO.pure(U32, " + sl + "(s, 0))\n"
-      + "    case Fail{e}:\n      (c, m) = e\n      do IO<U32>:\n        u2 : Unit <- File.close(f)\n        IO.pure(U32, c + " + sl + "(m, 0))");
+      + "    case Fail{e}:\n      (c, m) = e\n      do IO<U32>:\n        u2 : Unit <- File.close(f)\n        IO.pure(U32, (c + " + sl + "(m, 0) : U32))");
     const wk = "fw" + id;
     c.push("def " + wk + "(fr: File & Result<&1, &1, U32 & String, Unit>) -> IO(U32):\n"
       + "  (f, r) = fr\n  match r:\n    case Done{u3}:\n      do IO<U32>:\n        fr2 : File & Result<&1, &1, U32 & String, String> <- File.read(f, 4096)\n        " + rk + "(fr2)\n"
@@ -2783,7 +2789,7 @@ function io_tail(c: Ctx, seed: bigint): IoTail {
     const sl = helper_strlen(c);
     const ek = "ge" + id;
     c.push("def " + ek + "(r: Result<&1, &1, U32 & String, String>) -> U32:\n  match r:\n"
-      + "    case Done{s}:\n      " + sl + "(s, 1000)\n    case Fail{e}:\n      (c, m) = e\n      c + " + String(c.g.int(64)));
+      + "    case Done{s}:\n      " + sl + "(s, 1000)\n    case Fail{e}:\n      (c, m) = e\n      (c + " + String(c.g.int(64)) + " : U32)");
     lines.push("t" + id + "d : Result<&1, &1, U32 & String, String> <- IO.get_env(\"FZ_UNSET_" + String(c.g.int(1000)) + "\")");
     lines.push("t" + id + "e : Unit <- IO.print(U32.show(" + ek + "(t" + id + "d)))");
     // the errno/strerror pair for an unset name is platform text:
@@ -2858,7 +2864,7 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
   const lines = lines_gen(c, table, "res", size_pick(c, heavy ? 5 + c.g.int(5) : 2 + c.g.int(3), 48), env);
   if (c.g.chance(0.04)) {
     c.feat("deaddef");
-    c.push("def zd" + String(c.uid()) + "(x: U32) -> U32:\n  x + " + String(1 + c.g.int(99)));
+    c.push("def zd" + String(c.uid()) + "(x: U32) -> U32:\n  (x + " + String(1 + c.g.int(99)) + " : U32)");
   }
   const res = "r" + String(c.uid());
   const fold = e_at(num_combine(c.sub("fold"), stmt_names(lines).map((n) => e_atom(n)).concat([num_gen_u32(c.sub("fold"), env, 1)])));
@@ -2902,7 +2908,7 @@ function member_defs(m: Member, raw: boolean): string[] {
   const def = (name: string, ret: string): string => "def " + name + "() -> U32:\n  " + head + "\n  " + ret;
   const out = [def(m.resultName, m.seal)];
   if (raw) {
-    out.push(def(m.rawName, m.res + " + 0"));
+    out.push(def(m.rawName, "(" + m.res + " + 0 : U32)"));
   }
   if (m.extraName !== null) {
     out.push("def " + m.extraName + "() -> U32:\n  " + m.xlines.map((l) => l.text).concat([m.xfold]).join("\n  "));

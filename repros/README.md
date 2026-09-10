@@ -101,3 +101,24 @@ call result applied over-arity in main
   population is an interpreter performance tail, not hangs — but a real
   hang would be indistinguishable in the skip bucket; sweep
   `findings/skipped/` with a 120s budget to separate them.
+
+## Grammar note (2026-09-06)
+
+main's operator grammar changed on 2026-09-05: an operator is a method
+named by the `( .. : T)` frame around it, `+n` and the dotted F32 family
+are gone, and `assert`/`forall` read `law`/`for`. Of the repros here only
+`c_bracket_wall_chain.bend` (open class D) and
+`c_shared_read_then_drop_hang.bend` (class I, fixed) are ported; the
+rest, all fixed classes, still carry the old spellings and need porting
+before they parse. Each fixed class has a regression test in bend2-core.
+
+
+## 2026-09-07 run (bend2-core efead59 plus the nicolas3 fixes)
+
+One repro per class of `TRIAGE-2026-09-07.md`, verified against
+bend2-core from THIS directory with `bun ../../bend2-core/bend2/main.ts`:
+`comp_intr_boxed_arg.bend` (J, fixed), `comp_use_in_lent_pak.bend` (L,
+fixed), `comp_fuse_lent_literal.bend` (M, fixed),
+`comp_overlay_borrow_word.bend` (N, fixed), `comp_call_chain_cliff.bend`
+(K, open: emit time). Each fixed one crashes or diverges on efead59 and
+matches the interpreter with the fixes.

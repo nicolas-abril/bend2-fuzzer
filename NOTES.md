@@ -111,15 +111,17 @@ built around them:
   (`&` binds tighter than `->`).
 - Axioms are banned outside base ("a final unfilled assert is an error"),
   so the assert/def split is always filled.
-- `<<`/`>>` take a Nat count; there is no U32 `<`, `==` or `!=` infix
-  (calls through a Bool reader); `<>` is List-only cons (String uses
-  `SCon`/`++`).
+- An operator needs its `( .. : T)` frame (bare, it is Nat's): `+ - * /
+  % .&. .|. .^. << >> <= >= >` at U32, `+` at Nat, `+ - * / % <= >= >`
+  at F32; `<<`/`>>` take a Nat count; there is no `<`, `==` or `!=`
+  infix (calls through a Bool reader); `<>` is List-only cons (String
+  uses `SCon`/`++`).
 - `qt_fits` mirrors term_compare's Typ case: Data fits every kind, every
   kind fits Kind(&0) and Kind(&1), a left meet needs both sides, a right
   meet accepts either side, a stuck target licenses only an identical
   term. Ctor field kinds must fit the declared G.
 
-## Known noise and open compiler bugs (2026-09-01)
+## Known noise and open compiler bugs (2026-09-10)
 
 Remove entries here when the bends are fixed — every live finding class
 drowns real signal. Delta-reduced repros for all of these sit in
@@ -135,16 +137,23 @@ drowns real signal. Delta-reduced repros for all of these sit in
   callee holding a `!`-marked cut is never inlined into a fused
   continuation; regression-covered by `reg_fuse_bang_cut.bend`. Both
   fixes verified to leave every runtime bench's emitted C byte-identical.
-- **erased-arrow application** (OPEN, pre-existing, unmasked by the rwt
-  fix — ~1% of seeds): an erased-domain function value
-  (`@-zq: A -> B`) drops its lambda when compiled, but a dynamic
-  application can keep the erased argument when the function's Ann is
-  lost in the inliner readback. Loud flavor: "a Ctr-headed spine in an
-  expression" everywhere; silent flavor: C prints a WRONG VALUE and JS
-  throws TypeError (a payload applied as a function); it can also hang
-  the C binary (fires as `leg-timeout`). Repros:
-  `comp_erased_arrow_apply.bend`, `comp_erased_arrow_value.bend`,
-  `comp_erased_arrow_hang.bend`.
+- ~~erased-arrow application~~: FIXED (2026-09-05, "Drop the erased
+  applications of a function value", bend2-core PR #11): the carbonizer
+  drops an erased application whose head is a function value and reads
+  a value's quantities off its own annotation; regression-covered by
+  `reg_erased_arrow_apps.bend`. The 2026-09-04 triage's other classes
+  (A, B, E, H, I) are fixed too, and F (big-literal compile time) on
+  nicolas3 (a8917dc (efead59 before the rebase onto e913e65)), see `TRIAGE-2026-09-04.md`; D (the bracket wall)
+  stays open. The 2026-09-07 eight-hour run (`TRIAGE-2026-09-07.md`,
+  391k seeds) found four more compiler classes (J, L, M, N), all fixed
+  in the nicolas3 tree, six more D instances, and one open emit-time
+  cliff (K: a list literal of hundreds of calls).
+- The operator grammar changed on main (2026-09-05): an operator is a
+  method named by the `( .. : T)` frame around it, `+n` and the dotted
+  F32 family are gone, `assert`/`forall` read `law`/`for`. `e_bin`
+  spells the frame from the op's family tag; every raw template was
+  reframed. The repros under `repros/` predate this and need porting
+  before they parse.
 - ~~C livelock: packed ctor over a Char field~~: FIXED (2026-09-01) —
   a packed Char field ORed its tag/aux bits into the outer word, so
   the ctor masqueraded as cid|CID_CHR: misdispatched matches freed
@@ -153,6 +162,37 @@ drowns real signal. Delta-reduced repros for all of these sit in
   regression-covered by `reg_ctr_packed_char.bend`. Of the two finder
   seeds, 8559387686525276681 turned out to be the erased-arrow class
   below (which also fires as a C hang), not this one.
+- **`compiler-crash` packed-ctr-var-arg**: OPEN, and the only compiler
+  class the generator reached in the 2026-09-10 run (4 findings in 126k
+  seeds). A constructor whose own node layout is one machine word,
+  belonging to a boxed datatype, with its field spelled as a VARIABLE,
+  passed to a def that matches on it: the C emitter dies with `an
+  unbound binder: X` (X follows the variable). Introduced by bend2-core
+  `8627c94`'s packed-constructor borrow rule in `facts_scan`'s `site`,
+  NOT by the current tree's comp.ts work. C-only; the checker, the
+  interpreter and the JS backend all accept it. Repro
+  `repros/comp_packed_ctr_var_arg.bend`, details in
+  `TRIAGE-2026-09-10.md`.
+- **`Nat.read` is uninterpretable** since bend2-core `77eff95`
+  (2026-09-08): its overflow guard builds 2^48-1 as a unary Peano Nat
+  (`Nat.read.max`) per digit. Native on the compiled lanes, fatal under
+  the interpreter's structural evaluation. This is NOT a finding (rule
+  zero) but it is the dominant skip source: 89% of the 2026-09-10 run's
+  2,209 skips call `Nat.read`, and unlike previous runs' skips they do
+  NOT pass when re-run solo. It also cost that run three quarters of its
+  throughput (4.3-5.2 seeds/s against 13.6-18.8 on 2026-09-06) and
+  blinds the oracle on every `nat-showread` program. Reverting only that
+  hunk on HEAD takes a sampled seed from a 45.7s timeout to 0.2s.
+- ~~Class D, the clang 256-bracket wall~~: FIXED before 2026-09-10.
+  `repros/c_bracket_wall_chain.bend` compiles, and 126k seeds produced no
+  D finding. The 2026-09-04 triage's unapplied one-line patch is moot.
+- Class K (a list literal of hundreds of calls, emit time) stays open but
+  is about twice as fast since `7c2d194`: the repro takes 15.7s of user
+  time against 27.3s at its parent, same output.
+- The generator drifted from base twice by 2026-09-10 and both showed up
+  as `raw-reject` in `--smoke`: `Array.clone` gained `-T: Data`
+  (`592b0df`) and `Result.fail` was removed (spell the `Fail{..}` ctor).
+  Re-run `--smoke` after any base change before trusting a long run.
 - `trans-ulp` skips: float transcendentals are each backend's libm-family
   routines; a `trans`-flagged member keeps every leg except the JS-vs-C
   (and GPU) comparison of its extra line, which downgrades to a counted
