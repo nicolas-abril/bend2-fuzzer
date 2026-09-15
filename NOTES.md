@@ -145,6 +145,13 @@ from the one generator:
   `from_list`, `Set.del`, `List.map` (base's template, `~A, ~B, ~f`),
   `IO.try`. Not generated: `App.*`, `Image.*`, `Event`, the audio and
   window kits (effects), `Nat.read` (above).
+- **Two exceptions of the first nine-hour run's first chunk, fixed the
+  same night**: a pair drawn under a tuple took a matchable evidence type
+  (an indexed datatype) that the flat reader cannot open, so a pair's
+  evidence is now as matchable as the pair's own position (`imatch`
+  inherits) and a pair at the top of an arm reads its evidence as the
+  tail; and a call whose argument type had no value threw out of `syn`
+  (`syn_def_args` now answers null, no call).
 - **Probed while porting**: `where` makes the parameter a `Sigma<&1, &1,
   A, x => P(x)>` the def receives whole; `exs z: C` returns `(z, proof)`;
   mutual recursion through an unfilled law is base-only ("an unfilled
@@ -327,6 +334,14 @@ drowns real signal. Delta-reduced repros for all of these sit in
   `comp_family_arm_layout_2.bend`, `comp_family_arm_ctor_layout.bend`,
   `comp_family_arm_char_layout.bend`; details in `TRIAGE-2026-09-16.md`.
   Expect this class as noise until the emitter computes layouts per arm.
+- **`arity-wall` skips** (2026-09-16): the emitter refuses a segment
+  holding over 255 live words (`an arity over 255`, `FID_ARITY_T` is a
+  u8 table), which a list literal of hundreds of calls reaches (every
+  built element stays live across the next call's continuation). The
+  harness counts the refusal as a skip, not a finding: it is a documented
+  limit, loud, and the generator's own `stretch` lists are what hit it
+  (1 in 21k seeds). The old class K (an emit-time cliff on the same
+  shape) is this wall's slow neighbour.
 - **One-off, unreproduced (2026-09-16)**: seed 1363374988789664739 (a
   show program, `def main() -> Maybe<&2, D1>: Some{D1a{0n, Nil{}}}`, 31
   lines) failed C-SEQ with `bend: memory fault (machine stack overflow?)`

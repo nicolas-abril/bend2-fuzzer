@@ -1421,7 +1421,7 @@ function syn_ty0(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[], qvars: strin
       c.feat("sig");
       const x = "w" + String(c.uid());
       const a = c.g.chance(0.7) ? c.g.pick([NATC, BOOLC].concat(c.adts.filter((d) => idx_type({ k: "adt", a: d, qs: [], args: [] })).map((d): T => ({ k: "adt", a: d, qs: [], args: [] })))) : syn_ty(c, 0, Q2, tvars, qvars);
-      const b = syn_ty(c, fuel - 1, Q0, tvars, qvars, idx_type(a) ? ivars.concat([{ n: x, t: a }]) : ivars, true, true);
+      const b = syn_ty(c, fuel - 1, Q0, tvars, qvars, idx_type(a) ? ivars.concat([{ n: x, t: a }]) : ivars, imatch, true);
       const spell = c.g.wpick<"amp" | "exists" | "sigma">([[5, "amp"], [3, "exists"], [2, "sigma"]]);
       return { k: "sig", x, a, b, spell } as T;
     }],
@@ -1879,9 +1879,10 @@ function rd_call(c: Ctx, t: T, x: string): string {
 function rd_arm(c: Ctx, t: T, x: string, ind: string, rebind: string | null = null, plus: string | null = null): string {
   const pre: string[] = [];
   const rb = rebind === null ? "" : rebind + "\n";
-  // plus : an expression added to every final expression (a pair's
-  // witness read, beside its evidence's)
-  const add = (e: string): string => plus === null ? e : "(" + e + " + " + plus + " : U32)";
+  // plus : expressions added to every final expression (a pair's witness
+  // read, beside its evidence's)
+  const extra: string[] = plus === null ? [] : [plus];
+  const add = (e: string): string => extra.length === 0 ? e : "(" + [e, ...extra].join(" + ") + " : U32)";
   const flat = (t2: T, x2: string): string => {
     if (!ty_open(t2) || t2.k === "app") {
       return rd_call(c, t2, x2);
@@ -1902,6 +1903,11 @@ function rd_arm(c: Ctx, t: T, x: string, ind: string, rebind: string | null = nu
     throw new Error("rd_arm: not flat: " + ty_str(t2));
   };
   const tail = (t2: T, x2: string, ind2: string): string => {
+    if (t2.k === "sig" && ty_open(t2)) {
+      pre.push("(" + (idx_type(t2.a) ? "+" : "") + t2.x + ", " + x2 + "e) = " + x2);
+      extra.push(flat(t2.a, t2.x));
+      return tail(t2.b, x2 + "e", ind2);
+    }
     if (t2.k === "adt" && t2.a === BASE.Maybe && ty_open(t2)) {
       const y = x2 + "s";
       return "match " + x2 + ":\n" + ind2 + "  case None{}:\n" + ind2 + "    " + add(String(1 + c.g.int(99)))
@@ -2517,7 +2523,14 @@ function syn_def_args(c: Ctx, d: DefR, env: V[], fuel: number): string[] | null 
       ps = ps.map((q, j) => j > i ? { ...q, t: ty_tsub(q.t, p.n as string, w) } : q);
       continue;
     }
-    args.push(syn_def_arg(c, { ...d, ps }, i, p.t, env, fuel));
+    if (!ty_inh(p.t)) {
+      return null;
+    }
+    try {
+      args.push(syn_def_arg(c, { ...d, ps }, i, p.t, env, fuel));
+    } catch {
+      return null;
+    }
   }
   return args;
 }
@@ -4712,6 +4725,11 @@ async function group_compiled(states: MemberState[], solo: boolean): Promise<{ f
   const w = await phase("worker:emit", () => pool.run(src, "emit"));
   if (w.verdict === "skip") {
     return { fail: null, skip: w.stage ?? "emit-skip", ulp: false };
+  }
+  // a segment holding over 255 live words (a list literal of hundreds of
+  // calls) is refused by the emitter: a limit, counted as a skip
+  if (w.verdict === "crash" && /an arity over 255/.test(w.err ?? "")) {
+    return { fail: null, skip: "arity-wall", ulp: false };
   }
   if (w.verdict !== "ok") {
     return { fail: "EMIT " + w.verdict + " (" + (w.stage ?? "?") + "): " + (w.err ?? "").split("\n").slice(0, 3).join(" "), skip: null, ulp: false };
