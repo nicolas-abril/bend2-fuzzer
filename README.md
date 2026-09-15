@@ -84,16 +84,27 @@ bound quantity variables), data-kinded datatypes (`is Data` / `is Type` /
 `is Kind(a)` / `is Kind(a <&> b)`), the Fill (`D<..>`) and Plus (`+D<..>`)
 sugars, erased params and fields. Every primitive with special compilation
 is reachable: the full U32/F32/Nat op rosters, Bool/Cmp tables, Nat constant
-tables, `String.append`/`cmp`, Char packing, string/list literals, U32/Nat
-show+read roundtrips, `Array` new/get/set/swap/size/clone plus the `a[i]`
-sugar, Map/Set, fork trees with `!` GPU marks, closures and live-1 partial
+tables, `String.append`/`cmp`, Char packing, string/list literals, the U32
+and F32 show+read roundtrips, `F32.bits`, `List.map`, `IO.try`, `Array`
+new/get/set/swap/size/clone plus the `a[i]`
+sugar, Map/Set with `del`, `keys` and `from_list`, fork trees with `!` GPU marks, closures and live-1 partial
 application, do-notation (Maybe/Result/IO), equalities, rewrites, minted
 theorems, dependent families (large elimination and the Word idiom). Tail
 loops descend on any chain-shaped data (at most one self field per
 constructor): the program's own such ADTs, base's List at any element
 type (the generic ADT path where Nat takes the native), a String, or a
 Nat; the fuel value is synthesized like any other, so loops run over data
-the program already builds. The 2026-09 surface is covered: `+` on any
+the program already builds. Types are terms: the generator also mints
+families, type-level defs by match on an index (`law F: for x: Nat;
+Data` filled by `def F(x): match x: ..`), whose arms may be datatypes
+indexed by the arm's sub-index and holding the family at it (Word's
+idiom), so a `Vec` and its `fill`/`sum` emerge as an applied family
+`F(3n)` unfolds or goes through the family's index-generic defs.
+Propositions are arms and evidence too: `Empty`, equalities of literals,
+`{a != b : T}` refuted through a discriminating family, dependent pairs
+`&x: A -> B` (`Exists`), defs taking evidence about an earlier index
+parameter, laws with `where` and `exs` rows, `Or`/`Pair` spellings, and
+templates (`~f`) on the higher-order kit. The 2026-09 surface is covered: `+` on any
 binder (case fields, variable rows, tuple lets, parallel lets, lambdas,
 do binds and do lets), `h <> t` in terms and patterns, list literal
 patterns with a `_` row, array literals `[x : T*n]` / `[x : T^d]` and the

@@ -80,6 +80,78 @@ Ported to main `627df664` on 2026-09-15 (the port that followed the
   rides inside a List or Maybe (a Data element); the checker refuses
   it. Erased or dependent fields cannot be printed and are kept out.
 
+Types are terms, 2026-09-16: the dependent-type kit (`let_dep`) went,
+and its shapes, base's Word idiom, propositions and proofs now emerge
+from the one generator:
+
+- **Families** (`fam_new`): `law F: for x: I; Data|Type` then `def
+  F(x): match x:` with an arm per constructor of the index (Nat, Bool or
+  a minted enum). An arm is a type drawn by `syn_ty` with the arm's
+  sub-index in scope as a term (`ivars`): the family at it (`F(p)`), or a
+  datatype minted with the index as an erased parameter and holding the
+  family in a field (`adt_new(c, ips)`, spelled `D<-p: Nat>`). The law
+  comes first because such a datatype names the family before its fill.
+  An unfinished family may be applied only at its own sub-index (the
+  self-call must decrease).
+- **An applied family is a type** (`T.app`): a field, a parameter, a
+  list element, a return. `syn` unfolds a closed index to its arm, or
+  calls `mk_fam` (`def mf(n: I) -> F(n)` by match on n, the arm's value
+  synthesized with the sub-index in scope, so `F(p)` inside is the
+  recursive call); `rd` reads through `rd_fam` (`def rf(n: I, v: F(n))
+  -> U32`), the arm read INLINE (`rd_arm`: a tuple destructures, a Maybe
+  or an indexed datatype matches as the tail, the family at the index
+  calls `rf`). Inline because a reader minted under the index would
+  recurse back into `rf`, and mutual recursion needs a law forward
+  declaration, which only base may leave unfilled. So an index term
+  reaches a type's immediate structure only: `ivars` propagate into
+  tuple components, a function's result, and at the top of an arm into a
+  Maybe or an indexed datatype (`imatch`), never into a List, a Map or a
+  self-recursive datatype.
+- **The re-bind of the sub-index** (`case 1n+p0:` then `+p = p0`) sits
+  AFTER the destructures and INSIDE the match arms that read `v`: a let
+  cannot open a later scrutinee (`plus_binder_row`'s rule).
+- **Propositions** are types drawn where a type may be uninhabited
+  (`syn_ty(.., neg)`: a family's arm, a pair's evidence): `Empty`, `{l ==
+  r : I}` of index literals that agree or clash, `{l != r : I}` (a
+  function into Empty). `ty_inh` says whether a type has a value (a
+  family at a variable index when every arm does; a pair when some
+  witness makes its evidence so; a function when its result does or its
+  domain refutes), and `syn_ty` in a positive position redraws an
+  uninhabited type. `syn` gives `{==}`, `Unit{}`, a witness pair, and for
+  a clash a refutation: `refute_ensure` mints `def ne(e: {l == r : I}) ->
+  Empty: %e : Disc(_); Unit{}` over a discriminating family (`disc_fam`,
+  Empty at r and Unit elsewhere; for Nat one side must be 0n). `rd` reads
+  Empty as `match x:`.
+- **Dependent pairs** `&x: A -> B` (`T.sig`, spelled also `Exists(A, x
+  => B)` and `Sigma<&1, &1, A, x => B>`): the witness is mostly an index
+  term the evidence may mention through a family. A reader destructures
+  `(+x, e) = p` and reads e inline (`rd_arm`).
+- **Dependent parameters**: a minted def's later parameter may be
+  evidence `P(p_i)` about an earlier index parameter (which re-binds
+  reusable); `syn_def_args` picks that parameter's literal among those
+  under which every dependent type has a value (`dep-call`). The law
+  spelling reads a pair parameter over an index as `for p: A where
+  B[p]` (the def's parameter is the pair, as base's where-laws take it)
+  and a pair result as `exs z: C` plus the claim.
+- **Spellings**: `Or(A, B)` for Either at &1, &1, `Pair(A, B)` for `A &
+  B`, chosen at type creation (ty_str must stay a pure function of the
+  type: it keys every memo). A bare `&x: A -> B` parenthesizes at a law
+  row, a claim or an annotation (it would head a binder).
+- **Templates**: the higher-order kit's def takes `~f: U32 -> U32` a
+  third of the time, called with `~(y => ..)` or `~name` of a unary def;
+  a template def is not a registry callable.
+- **Natives by name now reached**: `F32.show`/`read` (a round trip on the
+  compiled side), `F32.bits`, `U32.shl`/`shr`, `Map.del`/`keys`/
+  `from_list`, `Set.del`, `List.map` (base's template, `~A, ~B, ~f`),
+  `IO.try`. Not generated: `App.*`, `Image.*`, `Event`, the audio and
+  window kits (effects), `Nat.read` (above).
+- **Probed while porting**: `where` makes the parameter a `Sigma<&1, &1,
+  A, x => P(x)>` the def receives whole; `exs z: C` returns `(z, proof)`;
+  mutual recursion through an unfilled law is base-only ("an unfilled
+  law is a dead claim"); a template argument must be closed; `Vec.S<p>`
+  takes the index as a type argument; `match e:` with no rows closes an
+  Empty branch; a refutation's motive must send the RIGHT side to Empty.
+
 Restructured on 2026-09-02:
 
 - **Ctx**: the generator's state is one `State` (entries, adts, registry,
@@ -230,18 +302,51 @@ drowns real signal. Delta-reduced repros for all of these sit in
   chain as its body; a nested match on a `+`-marked field binder), both
   fixed in the generator the same day. 227 skips, 204 of them programs
   that call `Nat.read` (below).
-- **`Nat.read` is still uninterpretable** on 2026-09-15: 1.7% of seeds
-  skip on `raw-worker-timeout`, nine tenths of them `nat-showread`
-  programs. Since bend2-core `77eff95`
-  (2026-09-08): its overflow guard builds 2^48-1 as a unary Peano Nat
-  (`Nat.read.max`) per digit. Native on the compiled lanes, fatal under
-  the interpreter's structural evaluation. This is NOT a finding (rule
-  zero) but it is the dominant skip source: 89% of the 2026-09-10 run's
-  2,209 skips call `Nat.read`, and unlike previous runs' skips they do
-  NOT pass when re-run solo. It also cost that run three quarters of its
-  throughput (4.3-5.2 seeds/s against 13.6-18.8 on 2026-09-06) and
-  blinds the oracle on every `nat-showread` program. Reverting only that
-  hunk on HEAD takes a sampled seed from a 45.7s timeout to 0.2s.
+- **`Nat.read` is not generated** since 2026-09-15 (it was the
+  `nat-showread` entry of `num_gen_nat`'s roster; `U32.read` stays).
+  Since bend2-core `77eff95` (2026-09-08) its overflow guard computes
+  `Nat.divmod(2^48-1 - d, 10)` per digit, and base's divmod is an
+  accumulator loop that counts the dividend down one cell at a time, so
+  under the interpreter's unary Nat nothing is observable before 2^48
+  iterations: laziness cannot help an accumulator. Native on the
+  compiled lanes, never finishes under the interpreter: 1.7% of the
+  2026-09-15 run's seeds skipped on it, 89% of the 2026-09-10 run's
+  2,209 skips, and none pass solo. A productive divmod (the quotient
+  emitted per full divisor window, `(dv.go(..), md.go(..))` as the pair)
+  was tried: it reads "4321" in 19 ms but the walk overflows the JS stack
+  near an accumulator of 16,000 cells, the interpreter's own depth limit
+  (`U32.to_nat(65535)` overflows the same way), so the round trip is out
+  of the oracle's reach either way and the roster drops it.
+- **`compiler-crash` family-arm-layout**: OPEN (2026-09-16), the first
+  class the dependent generator reached (3 findings in 7,875 seeds): a
+  family whose arms have different runtime layouts, read per arm by
+  `def rf(n: I, v: F(n))` after a match on the index, dies in the C
+  emitter with `a layout mismatch` or `a constructor outside its layout`
+  (4 findings in 21,075 seeds); the checker, the interpreter and the JS
+  backend run it. Repros `repros/comp_family_arm_layout_sig.bend`,
+  `comp_family_arm_layout_2.bend`, `comp_family_arm_ctor_layout.bend`,
+  `comp_family_arm_char_layout.bend`; details in `TRIAGE-2026-09-16.md`.
+  Expect this class as noise until the emitter computes layouts per arm.
+- **One-off, unreproduced (2026-09-16)**: seed 1363374988789664739 (a
+  show program, `def main() -> Maybe<&2, D1>: Some{D1a{0n, Nil{}}}`, 31
+  lines) failed C-SEQ with `bend: memory fault (machine stack overflow?)`
+  in two of three 300-seed runs from `--seed 3700`, never standalone: 300+
+  runs of the same binary (the run's own kept binary and C, byte-identical
+  to a standalone emission), under load, with a harness-like name and
+  cwd, with an empty and a 100 KB environment, all pass. The runtime maps
+  its pool MAP_NORESERVE and reports any SIGBUS/SIGSEGV with that text, so
+  a first-touch fault under memory pressure (8 jobs, clang, bun workers)
+  fits; a nondeterministic runtime bug does not fit the byte-identical
+  binary passing everywhere else. Left open; rule zero does not cover it
+  (it is not a timeout), so it will show as `leg-diverge` if it recurs.
+- **Worker isolation (2026-09-16)**: the worker clones base's book per
+  request by shallow-copying tlds, ctrs, order, and now the template
+  descriptors (`tmps`), each with a copy of its instance table and its
+  parser state re-pointed at the request's book. Without that, a program
+  instantiating base's `List.map` registered `List.map~0` in BASE's book
+  and the next request either lacked it ("a defined name"), redeclared it
+  ("duplicate declaration") or emitted over a stale instance (`t.$` of
+  undefined in carb_book). The CLI never sees this: one book per run.
 - ~~Class D, the clang 256-bracket wall~~: FIXED before 2026-09-10.
   `repros/c_bracket_wall_chain.bend` compiles, and 126k seeds produced no
   D finding. The 2026-09-04 triage's unapplied one-line patch is moot.

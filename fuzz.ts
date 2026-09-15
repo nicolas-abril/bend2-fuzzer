@@ -92,10 +92,30 @@
 //     from the op's family tag ("+n" Nat, "+." F32). There is no <, ==
 //     or != infix; those are calls folded through a minted Bool reader.
 //
+// TYPES ARE TERMS. Beside the datatypes it mints, the generator mints
+// families: a type-level def by match on one index (Nat, Bool or a minted
+// enum), `law F: for x: I; Data` then `def F(x): match x: ..`, each arm a
+// type drawn like any other in a scope where the arm's sub-index is a term
+// the type may mention, through the family itself at it or through a
+// datatype minted with the index as an erased parameter (Word's idiom,
+// `type D<-p: Nat> is Data: K{.., t: F(p)}`). An applied family F(3n) is
+// then a type wherever a type goes; a closed index unfolds to its arm and
+// a variable one goes through the family's index-generic defs (mk: the
+// value by match on the index; rd: the reader, its arm read inline). A
+// family's arm may be a proposition: Empty, an equality of literals that
+// agree or clash, or its negation; a dependent pair &x: A -> B (Exists)
+// holds a witness under which the evidence has a value; a clash is refuted
+// by a rewrite through a discriminating family; a minted def may take
+// evidence about an earlier index parameter and is called at the indices
+// whose arm has a value; the law spelling of such a def reads `for x: A
+// where P(x)` and a pair result reads `exs`. None of this is a kit: the
+// same syn/syn_ty/rd productions serve every type, so a Vec, a Word, an
+// IsZero, an Exists and their compositions emerge from one generator.
+//
 // Primitives with special compilation (comp.ts OPERATIONS/OPTIMIZED and
 // base.bend's native claims) are all reachable: the full U32/F32/Nat op
 // rosters, Bool/Cmp tables, String.append/cmp, Char packing, string and
-// list literals, U32/Nat show+read roundtrips, Array new/get/set/swap/
+// list literals, the U32 and F32 show+read roundtrips, F32.bits, Array new/get/set/swap/
 // size/clone plus the a[i] / a[i] <- v sugar, Map/Set (the one family that
 // runs as written), Nat constant tables (CONSTV), fork trees with `!` GPU
 // marks, closures, partial application, erased params/fields.
@@ -462,12 +482,23 @@ type T =
   | { k: "str" }
   | { k: "unit" }
   | { k: "tvar"; n: string; q: QT }
-  | { k: "adt"; a: Adt; qs: QT[]; args: T[] }
-  | { k: "tup"; a: T; b: T; q: 1 | 2 }
+  | { k: "adt"; a: Adt; qs: QT[]; args: T[]; iargs?: string[]; spell?: "or" }
+  | { k: "app"; f: Fam; arg: string }
+  | { k: "empty" }
+  | { k: "sig"; x: string; a: T; b: T; spell: "amp" | "exists" | "sigma" }
+  | { k: "tup"; a: T; b: T; q: 1 | 2; spell?: "pair" }
   | { k: "fun"; q: BQ; dom: T; cod: T }
   | { k: "arr"; el: T }
   | { k: "map"; q: QT; v: T }
-  | { k: "eql"; t: T; side: string };
+  | { k: "eql"; t: T; side: string; rhs?: string; spell?: "ne" };
+// Propositions are types: Empty has no value, {a == b : T} has one when the
+// sides agree, a dependent pair &x: A -> B holds a witness with evidence
+// about it (Exists), a family may send an index to Empty or to an
+// equality, and {a != b : T} is {a == b : T} -> Empty. Every one of them
+// is drawn by syn_ty like any type (Empty and a clashing equality only
+// where a type may be uninhabited: a family's arm, a pair's evidence),
+// inhabited by syn ({==}, Unit{}, a witness, a refutation through a
+// discriminating family), and read by rd (an empty match).
 
 // Field / ctor / adt : q on a field is its sigil; a "self" field is the
 // family at its own parameters. kind is the declared G (a QT over the
@@ -483,7 +514,34 @@ type Adt = {
   ctors: Ctor[];
   rec: boolean;
   base?: boolean;
+  // ips : erased index parameters (terms), the Word.Con<-p: Nat> shape; an
+  // instance supplies iargs, and a field may mention a family at one
+  ips?: IVar[];
 };
+
+// Families
+// --------
+// Types are terms: a family is a type-level def by match on one index,
+// `def F(x: I) -> K:` with an arm per constructor of I (Nat, Bool or a
+// minted enum). An arm is a type drawn like any other, in a scope where
+// the arm's sub-index is a term the type may mention: through the family
+// itself at the sub-index (F(p)), or through a datatype minted with that
+// index as an erased parameter and holding F(p) in a field (Word's
+// idiom). An applied family F(3n) is then a type like any other, at a
+// field, a parameter, a list element, a return, and the productions that
+// serve every type serve it: a closed index unfolds to its arm, a
+// variable index goes through an index-generic def that matches on it
+// (mk_fam: def mk(n: I) -> F(n), rd_fam: def rd(n: I, v: F(n)) -> U32),
+// so Vec's fill and sum, and the dependent-type kit, emerge from the one
+// generator.
+
+type IVar = { n: string; t: T; sub?: boolean };
+//   sub: the term is a family arm's sub-index (the one place an unfinished
+//   family may be applied: the self-call must decrease)
+type FamArm = { pat: string; sub: string | null; lit: string | null; ty: T };
+type Fam = { name: string; idx: T; kind: QT; arms: FamArm[]; done: boolean };
+//   done: false while the arms are being drawn, when the family may be
+//   applied only at its own sub-index (the self-call must decrease)
 
 const U32C: T = { k: "u32" };
 const F32C: T = { k: "f32" };
@@ -567,19 +625,31 @@ function ty_str(t: T): string {
     case "unit": return "Unit";
     case "tvar": return t.n;
     case "adt": {
-      if (t.qs.length + t.args.length === 0) {
+      const iargs = t.iargs ?? [];
+      if (t.spell === "or") {
+        return "Or(" + t.args.map(ty_grp).join(", ") + ")";
+      }
+      if (t.qs.length + t.args.length + iargs.length === 0) {
         return t.a.name;
       }
       // the Fill sugar (all &1) drops the quantity block and stays safe
       const all1 = t.qs.length > 0 && t.qs.every((q) => q.k === "q" && q.q === 1);
       if (all1 && t.args.length > 0) {
-        return t.a.name + "<" + t.args.map(ty_grp).join(", ") + ">";
+        return t.a.name + "<" + t.args.map(ty_grp).concat(iargs).join(", ") + ">";
       }
-      return t.a.name + "<" + t.qs.map(qt_str).concat(t.args.map(ty_grp)).join(", ") + ">";
+      return t.a.name + "<" + t.qs.map(qt_str).concat(t.args.map(ty_grp), iargs).join(", ") + ">";
     }
+    case "app": return t.f.name + "(" + t.arg + ")";
+    case "empty": return "Empty";
+    case "sig": return t.spell === "amp" ? "&" + t.x + ": " + ty_grp(t.a) + " -> " + ty_str(t.b)
+      : t.spell === "exists" ? "Exists(" + ty_grp(t.a) + ", " + t.x + " => " + ty_str(t.b) + ")"
+      : "Sigma<&1, &1, " + ty_grp(t.a) + ", " + t.x + " => " + ty_str(t.b) + ">";
     case "tup": {
       if (t.q === 2) {
         return "Sigma<&2, &2, " + ty_grp(t.a) + ", _ => " + ty_str(t.b) + ">";
+      }
+      if (t.spell === "pair") {
+        return "Pair(" + ty_grp(t.a) + ", " + ty_grp(t.b) + ")";
       }
       return ty_grp(t.a) + " & " + ty_grp(t.b);
     }
@@ -592,7 +662,7 @@ function ty_str(t: T): string {
     }
     case "arr": return "Array<" + ty_grp(t.el) + ">";
     case "map": return "Map<" + qt_str(t.q) + ", " + ty_grp(t.v) + ">";
-    case "eql": return "{" + t.side + " == " + t.side + " : " + ty_str(t.t) + "}";
+    case "eql": return "{" + t.side + (t.spell === "ne" ? " != " : " == ") + (t.rhs ?? t.side) + " : " + ty_str(t.t) + "}";
   }
 }
 
@@ -600,19 +670,22 @@ function ty_str(t: T): string {
 // blocks dropped behind a leading '+') fires here and only here
 function ty_top(t: T): string {
   if (t.k === "adt" && t.qs.length > 0 && t.qs.every((q) => q.k === "q" && q.q === 2)) {
-    return "+" + t.a.name + (t.args.length > 0 ? "<" + t.args.map(ty_grp).join(", ") + ">" : "");
+    const rest = t.args.map(ty_grp).concat(t.iargs ?? []);
+    return "+" + t.a.name + (rest.length > 0 ? "<" + rest.join(", ") + ">" : "");
   }
   if (t.k === "tup" && t.q === 2) {
     return "+Sigma<" + ty_grp(t.a) + ", _ => " + ty_str(t.b) + ">";
   }
-  return ty_str(t);
+  // a bare &x: A -> B heads a binder at a law row or a claim
+  return t.k === "sig" && t.spell === "amp" ? "(" + ty_str(t) + ")" : ty_str(t);
 }
 
 // ty_grp : parenthesize where juxtaposition would mis-parse: arrow domains,
 // tuple components inside other types, and type arguments (a FIRST argument
 // after `<` commits on one token; parens are harmless on the rest)
 function ty_grp(t: T): string {
-  return t.k === "fun" || (t.k === "tup" && t.q === 1) ? "(" + ty_str(t) + ")" : ty_str(t);
+  return t.k === "fun" || (t.k === "tup" && t.q === 1 && t.spell === undefined) || (t.k === "sig" && t.spell === "amp")
+    ? "(" + ty_str(t) + ")" : ty_str(t);
 }
 
 function ty_eq(a: T, b: T): boolean {
@@ -634,6 +707,9 @@ function ty_quant(t: T): QT {
     case "fun": return Q1;
     case "arr": return Q1;
     case "map": return t.q;
+    case "app": return t.f.kind;
+    case "empty": return Q2;
+    case "sig": return Q1;
   }
 }
 
@@ -677,11 +753,27 @@ function ty_sub(t: T, m: Map<string, T>, qm: Map<string, QT>): T {
       }
       return { k: "tvar", n: t.n, q: qt_sub(t.q, qm) };
     }
-    case "adt": return { k: "adt", a: t.a, qs: t.qs.map((q) => qt_sub(q, qm)), args: t.args.map((x) => ty_sub(x, m, qm)) };
-    case "tup": return { k: "tup", a: ty_sub(t.a, m, qm), b: ty_sub(t.b, m, qm), q: t.q };
+    case "adt": return { k: "adt", a: t.a, qs: t.qs.map((q) => qt_sub(q, qm)), args: t.args.map((x) => ty_sub(x, m, qm)), iargs: t.iargs, spell: t.spell };
+    case "sig": return { k: "sig", x: t.x, a: ty_sub(t.a, m, qm), b: ty_sub(t.b, m, qm), spell: t.spell };
+    case "tup": return { k: "tup", a: ty_sub(t.a, m, qm), b: ty_sub(t.b, m, qm), q: t.q, spell: t.spell };
     case "fun": return { k: "fun", q: t.q, dom: ty_sub(t.dom, m, qm), cod: ty_sub(t.cod, m, qm) };
     case "arr": return { k: "arr", el: ty_sub(t.el, m, qm) };
     case "map": return { k: "map", q: qt_sub(t.q, qm), v: ty_sub(t.v, m, qm) };
+    default: return t;
+  }
+}
+
+// ty_tsub : the type with the index term `n` replaced by `e` (an arm's
+// sub-index at a closed literal, a datatype's index parameter at its arg)
+function ty_tsub(t: T, n: string, e: string): T {
+  switch (t.k) {
+    case "app": return t.arg === n ? { k: "app", f: t.f, arg: e } : t;
+    case "adt": return { k: "adt", a: t.a, qs: t.qs, args: t.args.map((x) => ty_tsub(x, n, e)), iargs: (t.iargs ?? []).map((x) => x === n ? e : x), spell: t.spell };
+    case "tup": return { k: "tup", a: ty_tsub(t.a, n, e), b: ty_tsub(t.b, n, e), q: t.q, spell: t.spell };
+    case "sig": return t.x === n ? t : { k: "sig", x: t.x, a: ty_tsub(t.a, n, e), b: ty_tsub(t.b, n, e), spell: t.spell };
+    case "fun": return { k: "fun", q: t.q, dom: ty_tsub(t.dom, n, e), cod: ty_tsub(t.cod, n, e) };
+    case "arr": return { k: "arr", el: ty_tsub(t.el, n, e) };
+    case "map": return { k: "map", q: t.q, v: ty_tsub(t.v, n, e) };
     default: return t;
   }
 }
@@ -690,7 +782,11 @@ function ty_sub(t: T, m: Map<string, T>, qm: Map<string, QT>): T {
 function ty_open(t: T): boolean {
   switch (t.k) {
     case "tvar": return true;
-    case "adt": return t.args.some(ty_open) || t.qs.some((q) => qt_known(q) === null);
+    case "app": return !idx_is_lit(t.f.idx, t.arg);
+    // the pair binds its witness: the evidence is closed once it is a term
+    case "sig": return ty_open(t.a) || ty_open(idx_type(t.a) ? ty_tsub(t.b, t.x, idx_first(t.a)) : t.b);
+    case "adt": return t.args.some(ty_open) || t.qs.some((q) => qt_known(q) === null)
+      || (t.iargs ?? []).some((x, i) => !idx_is_lit((t.a.ips as IVar[])[i].t, x));
     case "tup": return ty_open(t.a) || ty_open(t.b);
     case "fun": return ty_open(t.dom) || ty_open(t.cod);
     case "arr": return ty_open(t.el);
@@ -716,8 +812,14 @@ function ty_unify(pat: T, goal: T, m: Map<string, T>, qm: Map<string, QT>): bool
   if (pat.k !== goal.k) {
     return false;
   }
+  if (pat.k === "app" && goal.k === "app") {
+    return pat.f === goal.f && pat.arg === goal.arg;
+  }
+  if (pat.k === "sig" && goal.k === "sig") {
+    return ty_unify(pat.a, goal.a, m, qm) && ty_unify(ty_tsub(pat.b, pat.x, goal.x), goal.b, m, qm);
+  }
   if (pat.k === "adt" && goal.k === "adt") {
-    if (pat.a !== goal.a) {
+    if (pat.a !== goal.a || (pat.iargs ?? []).join(",") !== (goal.iargs ?? []).join(",")) {
       return false;
     }
     for (let i = 0; i < pat.qs.length; i++) {
@@ -775,7 +877,8 @@ type DefR = {
   name: string;
   qps: string[];
   tps: Array<{ n: string; q: QT }>;
-  ps: Array<{ q: BQ; t: T }>;
+  // a parameter's type may name an earlier parameter (n) of an index type
+  ps: Array<{ q: BQ; t: T; n?: string }>;
   ret: T;
   mask?: Array<number | null>;
 };
@@ -784,6 +887,7 @@ type State = {
   uid: number;
   entries: string[];
   adts: Adt[];
+  fams: Fam[];
   defr: DefR[];
   memo: Map<string, string>;
   wip: Set<string>;
@@ -821,6 +925,9 @@ class Ctx {
   get adts(): Adt[] {
     return this.s.adts;
   }
+  get fams(): Fam[] {
+    return this.s.fams;
+  }
   get defr(): DefR[] {
     return this.s.defr;
   }
@@ -851,7 +958,7 @@ class Ctx {
 }
 
 function ctx_new(seed: bigint, uid0: number): Ctx {
-  return new Ctx({ uid: uid0, entries: [], adts: [], defr: [], memo: new Map(), wip: new Set(),
+  return new Ctx({ uid: uid0, entries: [], adts: [], fams: [], defr: [], memo: new Map(), wip: new Set(),
     mints: 0, feat: {}, pure: true, trans: false }, new Gen(rng_mix64(seed)));
 }
 
@@ -945,13 +1052,13 @@ function helper_strlen(c: Ctx): string {
     + n + "(t, (acc * 31 + " + helper_chr(c) + "(h) : U32))");
 }
 
-// helper_may / helper_maynat : Maybe<&2, U32|Nat> -> U32 (show/read roundtrips)
-function helper_may(c: Ctx): string {
-  return helper(c, "may", "mu", (c, n) => "def " + n + "(m: Maybe<&2, U32>, alt: U32) -> U32:\n  match m:\n    case None{}:\n      alt\n    case Some{v}:\n      v");
+// helper_may : Maybe<&2, U32> -> U32 (the U32 show/read roundtrip)
+function helper_mayf32(c: Ctx): string {
+  return helper(c, "mayf", "mf", (c, n) => "def " + n + "(m: Maybe<&2, F32>, alt: F32) -> F32:\n  match m:\n    case None{}:\n      alt\n    case Some{v}:\n      v");
 }
 
-function helper_maynat(c: Ctx): string {
-  return helper(c, "maynat", "mn", (c, n) => "def " + n + "(m: Maybe<&2, Nat>, alt: U32) -> U32:\n  match m:\n    case None{}:\n      alt\n    case Some{v}:\n      U32.from_nat(v)");
+function helper_may(c: Ctx): string {
+  return helper(c, "may", "mu", (c, n) => "def " + n + "(m: Maybe<&2, U32>, alt: U32) -> U32:\n  match m:\n    case None{}:\n      alt\n    case Some{v}:\n      v");
 }
 
 // Num
@@ -1028,6 +1135,12 @@ function num_gen_u32(c: Ctx, env: V[], fuel: number): E {
       return e_fn("F32.to_u32", num_gen_f32(c, env, fuel - 1));
     }],
     [!c.pure ? 3 : 0, () => {
+      c.feat("f32-bits");
+      return e_fn("F32.bits", num_gen_f32(c, env, fuel - 1));
+    }],
+    // the one-step shifts (U32.shl/shr take no count)
+    [2, () => e_fn("U32." + c.g.pick(["shl", "shr"]), num_gen_u32(c, env, fuel - 1))],
+    [!c.pure ? 3 : 0, () => {
       c.feat("f32-cmp");
       const op = c.g.pick(["==.", "!=.", "<.", "<=.", ">.", ">=."]);
       return e_fn(helper_bool(c), e_bin(num_gen_f32(c, env, fuel - 1), op, num_gen_f32(c, env, fuel - 1)));
@@ -1058,10 +1171,8 @@ function num_gen_nat(c: Ctx, env: V[], fuel: number): E {
     [6, () => e_fn("Nat.mul", e_atom(String(c.g.int(40)) + "n"), e_atom(String(c.g.int(40)) + "n"))],
     [4, () => e_fn("Nat.double", num_gen_nat(c, env, fuel - 1))],
     [6, () => e_fn("U32.to_nat", e_bin(num_gen_u32(c, env, 0), "%", e_atom(String(2 + c.g.int(500)))))],
-    [3, () => {
-      c.feat("nat-showread");
-      return e_fn("U32.to_nat", e_bin(e_fn(helper_maynat(c), e_fn("Nat.read", e_fn("Nat.show", num_gen_nat(c, env, fuel - 1))), num_lit_u32(c)), "%", e_atom("1024")));
-    }],
+    // no Nat.read: its overflow guard divides 2^48-1 as a unary Nat per
+    // digit, which the interpreter cannot finish (see NOTES.md)
   ])();
 }
 
@@ -1089,6 +1200,11 @@ function num_gen_f32(c: Ctx, env: V[], fuel: number): E {
     [vars.length > 0 ? 12 : 0, () => e_atom(env_take(c.g.pick(vars)))],
     [4, () => num_lit_f32(c, true)],
     [12, () => e_fn("U32.to_f32", num_gen_u32(c, env, 0))],
+    // the show/read round trip of a float (a native on every compiled lane)
+    [3, () => {
+      c.feat("f32-showread");
+      return e_fn(helper_mayf32(c), e_fn("F32.read", e_fn("F32.show", num_gen_f32(c, env, fuel - 1))), num_lit_f32(c, false));
+    }],
     [34, () => {
       c.feat("f32-arith");
       return e_bin(num_gen_f32(c, env, fuel - 1), c.g.pick(["+.", "-.", "*."]), num_gen_f32(c, env, fuel - 1));
@@ -1198,9 +1314,29 @@ function str_lit(c: Ctx, n: number): string {
 
 type TvarInfo = { n: string; q: QT };
 
-function syn_ty(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[] = [], qvars: string[] = []): T {
+function syn_ty(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[] = [], qvars: string[] = [], ivars: IVar[] = [], imatch = true, neg = false): T {
+  const t = syn_ty0(c, fuel, need, tvars, qvars, ivars, imatch, neg);
+  // a type that must have a value: draw again, then settle on U32
+  if (!neg && !ty_inh(t)) {
+    const t2 = syn_ty0(c, fuel, need, tvars, qvars, ivars, imatch, neg);
+    return ty_inh(t2) ? t2 : U32C;
+  }
+  return t;
+}
+
+// eql_lit : {l == r : I} over an index type, agreeing sides or a clash
+function eql_lit(c: Ctx, clash: boolean): T {
+  const t = c.g.pick([NATC, BOOLC]);
+  const ls = idx_lits(t);
+  const l = c.g.pick(ls);
+  const r = clash ? c.g.pick(ls.filter((x) => x !== l && (t.k !== "nat" || l === "0n" || x === "0n"))) : l;
+  return { k: "eql", t, side: l, rhs: r };
+}
+
+function syn_ty0(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[], qvars: string[], ivars: IVar[], imatch: boolean, neg: boolean): T {
   const fits = (t: T): boolean => qt_fits(ty_quant(t), need);
   const tfit = tvars.filter((tv) => qt_fits(tv.q, need));
+  const ffit = c.fams.filter((f) => qt_fits(f.kind, need) && (f.done || ivars.some((iv) => iv.sub === true && ty_eq(iv.t, f.idx))));
   const pick_qt = (): QT => {
     if (qvars.length > 0 && c.g.chance(0.4)) {
       return { k: "qv", n: c.g.pick(qvars) };
@@ -1234,26 +1370,323 @@ function syn_ty(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[] = [], qvars: s
         if (!qt_fits(inst_kind, need)) {
           continue;
         }
-        const args = a.tps.map((tp) => syn_ty(c, fuel - 1, qt_sub(tp.q, qm), tvars, qvars));
-        return { k: "adt", a, qs, args } as T;
+        // an index term reaches a Maybe's element at the top of an arm; the
+        // other datatypes take closed types
+        const args = a.tps.map((tp) => syn_ty(c, fuel - 1, qt_sub(tp.q, qm), tvars, qvars, a === BASE.Maybe && imatch ? ivars : [], false));
+        // an indexed datatype takes a closed index, or a matching index term
+        const iargs = (a.ips ?? []).map((ip) => a.ips !== undefined && imatch ? idx_arg(c, ip.t, ivars) : idx_lit(c, ip.t));
+        // Either at &1, &1 may spell as Or(A, B)
+        const spell = a === BASE.Either && qs.every((q) => q.k === "q" && q.q === 1) && c.g.chance(0.4) ? "or" : undefined;
+        if (spell !== undefined) {
+          c.feat("or");
+        }
+        return { k: "adt", a, qs, args, iargs, spell } as T;
       }
       return U32C;
     }],
+    // an applied family: a closed index, or one of the index terms in scope
+    [fuel > 0 && ffit.length > 0 ? 8 : 0, () => {
+      const f = c.g.pick(ffit);
+      c.feat("fam-use");
+      const arg = f.done ? idx_arg(c, f.idx, ivars) : c.g.pick(ivars.filter((iv) => iv.sub === true && ty_eq(iv.t, f.idx))).n;
+      return { k: "app", f, arg } as T;
+    }],
+    // inside a family's arm: a datatype indexed by the arm's sub-index,
+    // whose fields may hold the family at it (Word's idiom)
+    [fuel > 0 && ivars.length > 0 && imatch && c.g.chance(0.5) ? 14 : 0, () => {
+      const a = adt_new(c.sub("iadt"), ivars, need);
+      return { k: "adt", a, qs: [], args: [], iargs: ivars.map((iv) => iv.n) } as T;
+    }],
     [fuel > 0 ? 8 : 0, () => {
       const q: 1 | 2 = needData ? 2 : c.g.chance(0.3) ? 2 : 1;
-      const el = (): T => syn_ty(c, fuel - 1, q === 2 ? Q2 : need, tvars, qvars);
-      return { k: "tup", a: el(), b: el(), q } as T;
+      const el = (): T => syn_ty(c, fuel - 1, q === 2 ? Q2 : need, tvars, qvars, ivars, false);
+      const spell = q === 1 && c.g.chance(0.2) ? "pair" : undefined;
+      if (spell !== undefined) {
+        c.feat("pair");
+      }
+      return { k: "tup", a: el(), b: el(), q, spell } as T;
     }],
     [fuel > 0 && !needData ? 7 : 0, () => {
       const q: BQ = c.g.wpick<BQ>([[7, 1], [2, 0], [1, 2]]);
       const dom = q === 2 ? syn_ty(c, 0, Q2, tvars, qvars) : syn_ty(c, fuel - 1, Q0, tvars, qvars);
-      return { k: "fun", q, dom, cod: syn_ty(c, fuel - 1, Q0, tvars, qvars) } as T;
+      return { k: "fun", q, dom, cod: syn_ty(c, fuel - 1, Q0, tvars, qvars, ivars, false) } as T;
     }],
     [fuel > 0 && c.g.chance(0.4) ? 4 : 0, () => {
       const q = needData ? Q2 : pick_qt();
       return { k: "map", q, v: syn_ty(c, 0, q, tvars, qvars) } as T;
     }],
+    // a dependent pair: a witness, mostly an index term, and evidence about
+    // it, which may be a proposition
+    [fuel > 0 && !needData ? 3 : 0, () => {
+      c.feat("sig");
+      const x = "w" + String(c.uid());
+      const a = c.g.chance(0.7) ? c.g.pick([NATC, BOOLC].concat(c.adts.filter((d) => idx_type({ k: "adt", a: d, qs: [], args: [] })).map((d): T => ({ k: "adt", a: d, qs: [], args: [] })))) : syn_ty(c, 0, Q2, tvars, qvars);
+      const b = syn_ty(c, fuel - 1, Q0, tvars, qvars, idx_type(a) ? ivars.concat([{ n: x, t: a }]) : ivars, true, true);
+      const spell = c.g.wpick<"amp" | "exists" | "sigma">([[5, "amp"], [3, "exists"], [2, "sigma"]]);
+      return { k: "sig", x, a, b, spell } as T;
+    }],
+    // propositions, where the type may be uninhabited: Empty, an equality
+    // of literals (agreeing or a clash), its negation
+    [neg ? 6 : 0, () => {
+      c.feat("empty");
+      return { k: "empty" } as T;
+    }],
+    [neg ? 5 : 0, () => {
+      const clash = c.g.chance(0.5);
+      c.feat(clash ? "eql-clash" : "eql-lit");
+      return eql_lit(c, clash);
+    }],
+    [neg && !needData ? 3 : 0, () => {
+      c.feat("eql-ne");
+      const e = eql_lit(c, c.g.chance(0.7)) as Extract<T, { k: "eql" }>;
+      return { k: "fun", q: 1, dom: e, cod: { k: "empty" } } as T;
+    }],
   ])();
+}
+
+// idx_type : may a term of this type index a family (Nat, Bool, an enum)?
+function idx_type(t: T): boolean {
+  return t.k === "nat" || t.k === "bool"
+    || (t.k === "adt" && t.a.qps.length === 0 && t.a.tps.length === 0 && t.a.ips === undefined && ty_data(t)
+      && t.a.ctors.length > 0 && t.a.ctors.every((ct) => ct.fields.length === 0));
+}
+
+// idx_lits : the closed literals syn draws for an index type (Nat: 0..3)
+function idx_lits(t: T): string[] {
+  if (t.k === "nat") {
+    return ["0n", "1n", "2n", "3n"];
+  }
+  if (t.k === "bool") {
+    return ["False{}", "True{}"];
+  }
+  if (t.k === "adt") {
+    return t.a.ctors.map((ct) => ct.name + "{}");
+  }
+  return [];
+}
+
+function idx_first(t: T): string {
+  return idx_lits(t)[0];
+}
+
+// ty_inh : has the type a value the generator can build? A family at an
+// index term is inhabited when every arm is; a pair when some witness
+// makes its evidence so; a function when its result is, or its domain
+// refutes; an equality when its sides agree.
+function ty_inh(t: T, seen: Set<Adt | Fam> = new Set()): boolean {
+  switch (t.k) {
+    case "empty": return false;
+    case "eql": return t.rhs === undefined || t.rhs === t.side;
+    case "app": {
+      const arm = fam_unfold(t.f, t.arg);
+      return arm !== null ? ty_inh(arm, seen) : fam_total(t.f, seen);
+    }
+    case "sig": return idx_type(t.a) ? idx_lits(t.a).some((w) => ty_inh(ty_tsub(t.b, t.x, w), seen)) : ty_inh(t.a, seen) && ty_inh(t.b, seen);
+    case "fun": return ty_inh(t.cod, seen) || ty_refutable(t.dom);
+    case "tup": return ty_inh(t.a, seen) && ty_inh(t.b, seen);
+    case "adt": {
+      // a datatype met again on the way is taken inhabited: recursion
+      // through a family's sub-index ends at the base arm
+      if (seen.has(t.a)) {
+        return true;
+      }
+      const s2 = new Set(seen).add(t.a);
+      return t.a.ctors.length === 0 ? false
+        : t.a.ctors.some((ct) => ct.fields.every((f) => f.q === 0 || ty_inh(f.t, s2)));
+    }
+    default: return true;
+  }
+}
+
+function fam_total(f: Fam, seen: Set<Adt | Fam> = new Set()): boolean {
+  if (seen.has(f)) {
+    return true;
+  }
+  const s2 = new Set(seen).add(f);
+  return f.done && f.arms.every((arm) => ty_inh(arm.ty, s2));
+}
+
+// ty_refutable : an equality of two different constructor literals of an
+// index type (for Nat, one side is 0n), refuted by a rewrite through a
+// discriminating family
+function ty_refutable(t: T): boolean {
+  if (t.k !== "eql" || t.rhs === undefined || t.rhs === t.side || !idx_type(t.t)) {
+    return false;
+  }
+  return t.t.k !== "nat" || t.side === "0n" || t.rhs === "0n";
+}
+
+// idx_lit : a closed literal of an index type; idx_arg : that, or an index
+// term in scope (an arm's sub-index) when one has the type
+function idx_lit(c: Ctx, t: T): string {
+  if (t.k === "nat") {
+    return String(c.g.int(4)) + "n";
+  }
+  if (t.k === "bool") {
+    return c.g.pick(["False{}", "True{}"]);
+  }
+  if (t.k === "adt") {
+    return c.g.pick(t.a.ctors).name + "{}";
+  }
+  throw new Error("not an index type: " + ty_str(t));
+}
+
+function idx_arg(c: Ctx, t: T, ivars: IVar[]): string {
+  const vs = ivars.filter((iv) => ty_eq(iv.t, t));
+  return vs.length > 0 && c.g.chance(0.7) ? c.g.pick(vs).n : idx_lit(c, t);
+}
+
+function idx_is_lit(t: T, arg: string): boolean {
+  if (t.k === "nat") {
+    return /^\d+n$/.test(arg);
+  }
+  return /\{\}$/.test(arg);
+}
+
+// fam_unfold : the arm a closed index selects, with the arm's sub-index
+// (if any) substituted; null on a variable index
+function fam_unfold(f: Fam, arg: string): T | null {
+  if (!idx_is_lit(f.idx, arg)) {
+    return null;
+  }
+  if (f.idx.k === "nat") {
+    const n = Number(arg.slice(0, -1));
+    const arm = f.arms[n === 0 ? 0 : 1];
+    return arm.sub === null ? arm.ty : ty_tsub(arm.ty, arm.sub, String(n - 1) + "n");
+  }
+  const arm = f.arms.find((x) => x.lit === arg);
+  return arm === undefined ? null : arm.ty;
+}
+
+// fam_new : def F(x: I) -> K by match, one arm per constructor of I
+function fam_new(c: Ctx): Fam {
+  const name = "F" + String(c.uid());
+  const ik = c.g.wpick<string>([[5, "nat"], [3, "bool"], [3, "enum"]]);
+  c.feat("fam-" + ik);
+  let idx: T = ik === "nat" ? NATC : BOOLC;
+  if (ik === "enum") {
+    const en = "E" + String(c.uid());
+    const ctors = ["a", "b", "c"].slice(0, 2 + c.g.int(2)).map((x) => ({ name: en + x, fields: [] }));
+    const a: Adt = { name: en, qps: [], tps: [], kind: Q2, ctors, rec: false };
+    c.push("type " + en + " is Data:\n" + ctors.map((ct) => "  " + ct.name + "{}").join("\n"));
+    c.adts.push(a);
+    idx = { k: "adt", a, qs: [], args: [] };
+  }
+  const kind = c.g.chance(0.5) ? Q2 : Q1;
+  const f: Fam = { name, idx, kind, arms: [], done: false };
+  c.fams.push(f);
+  // the law first (a datatype minted in an arm mentions the family), the
+  // def fills it after the arms: base's own Word ordering
+  const kind_s = qt_known(kind) === 2 ? "Data" : "Type";
+  c.push("law " + name + ":\n  for x: " + ty_str(idx) + "\n  " + kind_s);
+  const pats: Array<{ pat: string; sub: string | null; lit: string | null }> = ik === "nat"
+    ? [{ pat: "0n", sub: null, lit: "0n" }, { pat: "1n+p", sub: "p", lit: null }]
+    : ik === "bool" ? [{ pat: "False{}", sub: null, lit: "False{}" }, { pat: "True{}", sub: null, lit: "True{}" }]
+    : (idx as Extract<T, { k: "adt" }>).a.ctors.map((ct) => ({ pat: ct.name + "{}", sub: null, lit: ct.name + "{}" }));
+  for (const pt of pats) {
+    // the recursive arm may mention the family at its sub-index; the rest
+    // are ordinary types, so every unfolding ends
+    const ivars: IVar[] = pt.sub === null ? [] : [{ n: pt.sub, t: idx, sub: true }];
+    const ty = syn_ty(c.sub("arm"), 2, kind, [], [], ivars, true, true);
+    f.arms.push({ ...pt, ty });
+  }
+  const rows = f.arms.map((arm) => "    case " + arm.pat + ":\n      " + ty_str(arm.ty));
+  c.push("def " + name + "(x):\n  match x:\n" + rows.join("\n"));
+  f.done = true;
+  return f;
+}
+
+// fam_pat : an arm's case row in an index-generic def; the sub-index binds
+// under a fresh name and re-binds reusable, since the arm may hold the
+// family at it more than once
+function fam_pat(arm: FamArm, rebind: boolean): string {
+  if (arm.sub === null) {
+    return arm.pat + ":";
+  }
+  return arm.pat.replace(arm.sub, arm.sub + "0") + ":" + (rebind ? "\n      " + fam_rebind(arm) : "");
+}
+
+function fam_rebind(arm: FamArm): string {
+  return "+" + arm.sub + " = " + arm.sub + "0";
+}
+
+// refute_ensure : def rf(e: {l == r : I}) -> Empty, for two different
+// constructor literals: a discriminating family sends r to Empty and the
+// rest to Unit, so rewriting the goal Empty (= Disc(r)) through e leaves
+// Disc(l) = Unit, answered by Unit{}
+function refute_ensure(c: Ctx, e: Extract<T, { k: "eql" }>): string {
+  const key = "refute:" + ty_str(e);
+  const got = c.memo.get(key);
+  if (got !== undefined) {
+    return got;
+  }
+  c.feat("refute");
+  const r = e.rhs as string;
+  const disc = disc_fam(c, e.t, r);
+  const name = "ne" + String(c.uid());
+  c.memo.set(key, name);
+  c.push("def " + name + "(e: {" + e.side + " == " + r + " : " + ty_str(e.t) + "}) -> Empty:\n  %e : " + disc.name + "(_);\n  Unit{}");
+  return name;
+}
+
+// disc_fam : the family over an index type that is Empty at one literal and
+// Unit elsewhere (for Nat, at zero or at every successor)
+function disc_fam(c: Ctx, idx: T, at: string): Fam {
+  const key = "disc:" + ty_str(idx) + ":" + at;
+  const got = c.memo.get(key);
+  if (got !== undefined) {
+    return c.fams.find((f) => f.name === got) as Fam;
+  }
+  const name = "F" + String(c.uid());
+  c.memo.set(key, name);
+  const arms: FamArm[] = idx.k === "nat"
+    ? [{ pat: "0n", sub: null, lit: "0n", ty: at === "0n" ? { k: "empty" } : UNITC },
+      { pat: "1n+p", sub: "p", lit: null, ty: at === "0n" ? UNITC : { k: "empty" } }]
+    : idx_lits(idx).map((l) => ({ pat: l, sub: null, lit: l, ty: (l === at ? { k: "empty" } : UNITC) as T }));
+  const f: Fam = { name, idx, kind: Q2, arms, done: true };
+  c.fams.push(f);
+  c.push("def " + name + "(x: " + ty_str(idx) + ") -> Data:\n  match x:\n" + arms.map((arm) => "    case " + arm.pat + ":\n      " + ty_str(arm.ty)).join("\n"));
+  return f;
+}
+
+// mk_fam : def mk(n: I) -> F(n), the index-generic value of a family:
+// each arm synthesizes its type with the sub-index in scope, so F(p)
+// inside is the recursive call
+function mk_fam(c: Ctx, f: Fam): string {
+  const key = "mk:fam:" + f.name;
+  const got = c.memo.get(key);
+  if (got !== undefined) {
+    return got;
+  }
+  const name = "mf" + String(c.uid());
+  c.memo.set(key, name);
+  c.feat("fam-mk");
+  c = c.sub("mkf");
+  const rows = f.arms.map((arm) => {
+    const env: V[] = arm.sub === null ? [] : [v_new(arm.sub, f.idx, true)];
+    return "    case " + fam_pat(arm, true) + "\n      " + e_at(syn(c, arm.ty, env, 1));
+  });
+  c.push("def " + name + "(n: " + ty_str(f.idx) + ") -> " + f.name + "(n):\n  match n:\n" + rows.join("\n"));
+  return name;
+}
+
+// rd_fam : def rd(n: I, v: F(n)) -> U32, reading v at the arm the index
+// selects (the checker refines v's type under the match on n)
+function rd_fam(c: Ctx, f: Fam): string {
+  const key = "rd:fam:" + (c.pure ? "p:" : "x:") + f.name;
+  const got = c.memo.get(key);
+  if (got !== undefined) {
+    return got;
+  }
+  const name = "rf" + String(c.uid());
+  c.memo.set(key, name);
+  c.feat("fam-rd");
+  c = c.sub("rdf");
+  // the re-bind of the sub-index sits after the destructures and inside
+  // the match arms that read v: a let cannot open a later scrutinee
+  const rows = f.arms.map((arm) => "    case " + fam_pat(arm, false) + "\n      " + rd_arm(c, arm.ty, "v", "      ", arm.sub === null ? null : fam_rebind(arm)));
+  c.push("def " + name + "(n: " + ty_str(f.idx) + ", v: " + f.name + "(n)) -> U32:\n  match n:\n" + rows.join("\n"));
+  return name;
 }
 
 // Adt minting
@@ -1263,13 +1696,15 @@ function syn_ty(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[] = [], qvars: s
 // (is Type: closure and Array-free function fields welcome). Ctor 0 never
 // recurs; self fields keep uniform recursion so minted folds descend.
 
-function adt_new(c: Ctx): Adt {
+function adt_new(c: Ctx, ips: IVar[] = [], ikind: QT | null = null): Adt {
   const id = c.uid();
   const name = "D" + String(id);
-  const flavor = c.g.wpick<string>([[5, "data"], [4, "qpoly"], [2, "type"]]);
+  // an indexed datatype (ips) is monomorphic over its index: its kind is
+  // the family arm's, its fields may hold the family at the index
+  const flavor = ips.length > 0 ? (qt_known(ikind ?? Q2) === 2 ? "data" : "type") : c.g.wpick<string>([[5, "data"], [4, "qpoly"], [2, "type"]]);
   const nqp = flavor === "qpoly" ? 1 + c.g.int(2) : 0;
   const qps = ["qa", "qb"].slice(0, nqp);
-  const ntp = flavor === "qpoly" ? Math.max(1, c.g.int(3)) : flavor === "type" ? c.g.int(2) : 0;
+  const ntp = ips.length > 0 ? 0 : flavor === "qpoly" ? Math.max(1, c.g.int(3)) : flavor === "type" ? c.g.int(2) : 0;
   const tps: Array<{ n: string; q: QT }> = [];
   for (let i = 0; i < ntp; i++) {
     const q: QT = nqp > 0 ? { k: "qv", n: qps[i % nqp] } : Q1;
@@ -1287,7 +1722,10 @@ function adt_new(c: Ctx): Adt {
     c.feat("kind-qvar");
     kind = { k: "qv", n: qps[0] };
   }
-  const a: Adt = { name, qps, tps, kind, ctors: [], rec: false };
+  const a: Adt = { name, qps, tps, kind, ctors: [], rec: false, ips: ips.length > 0 ? ips : undefined };
+  if (ips.length > 0) {
+    c.feat("adt-indexed");
+  }
   const selfT: T = {
     k: "adt", a, qs: qps.map((n) => ({ k: "qv", n }) as QT),
     args: tps.map((tp) => ({ k: "tvar", n: tp.n, q: tp.q }) as T),
@@ -1305,10 +1743,17 @@ function adt_new(c: Ctx): Adt {
         fields.push({ q: 0, t: syn_ty(c, 1, Q0, tvinfo, qps) });
         continue;
       }
-      const self = ci > 0 && c.g.chance(0.3);
+      const self = ips.length === 0 && ci > 0 && c.g.chance(0.3);
       if (self) {
         a.rec = true;
         fields.push({ q: 1, t: selfT });
+        continue;
+      }
+      // an indexed datatype's field: a family at the index, or any type
+      // drawn with the index in scope
+      if (ips.length > 0) {
+        const t0 = syn_ty(c, 1, flavor === "data" ? Q2 : Q1, [], [], ips, false);
+        fields.push({ q: 1, t: t0 });
         continue;
       }
       // a live field's kind must fit Kind(G): parameter types fit by
@@ -1328,7 +1773,7 @@ function adt_new(c: Ctx): Adt {
     }
     a.ctors.push({ name: name + ("abcd"[ci] ?? "k" + String(ci)), fields });
   }
-  const head = qps.concat(tps.map((tp) => "-" + tp.n + ": Kind(" + qt_bare(tp.q) + ")"));
+  const head = qps.concat(tps.map((tp) => "-" + tp.n + ": Kind(" + qt_bare(tp.q) + ")"), ips.map((ip) => "-" + ip.n + ": " + ty_str(ip.t)));
   const kind_s = flavor === "data" ? "Data" : flavor === "type" ? "Type" : "Kind(" + qt_bare(kind) + ")";
   const rows = a.ctors.map((ct) => "  " + ct.name + "{"
     + ct.fields.map((f, i) => bq_prefix(f.q) + "g" + String(i) + ": " + ty_top(f.t)).join(", ") + "}");
@@ -1353,9 +1798,19 @@ function adt_inst(c: Ctx, a: Adt, needData: boolean): T | null {
       continue;
     }
     const args = a.tps.map((tp) => syn_ty(c, 1, qt_sub(tp.q, qm), [], []));
-    return { k: "adt", a, qs, args };
+    return { k: "adt", a, qs, args, iargs: (a.ips ?? []).map((ip) => idx_lit(c, ip.t)) };
   }
   return null;
+}
+
+// adt_field_ty : a field's type at an instance: type args substituted, and
+// an indexed datatype's index params replaced by the instance's args
+function adt_field_ty(ft: T, t: Extract<T, { k: "adt" }>, m: Map<string, T>, qm: Map<string, QT>): T {
+  let r = ty_sub(ft, m, qm);
+  (t.a.ips ?? []).forEach((ip, i) => {
+    r = ty_tsub(r, ip.n, (t.iargs ?? [])[i]);
+  });
+  return r;
 }
 
 // Pattern helpers
@@ -1372,7 +1827,7 @@ function adt_row(c: Ctx, t: Extract<T, { k: "adt" }>, ct: Ctor, scrMany: boolean
   for (let i = 0; i < ct.fields.length; i++) {
     const f = ct.fields[i];
     const nm = "m" + String(c.uid());
-    const ft = ty_sub(f.t, m, qm);
+    const ft = adt_field_ty(f.t, t, m, qm);
     if (f.q === 0) {
       names.push(nm);
       continue;
@@ -1404,6 +1859,88 @@ function adt_row(c: Ctx, t: Extract<T, { k: "adt" }>, ct: Ctor, scrMany: boolean
 // dropped — base's F32 ops are stuck in the interpreter. Literal salts
 // keep arms distinguishable.
 
+// rd_call : the reader applied to x; a family at an index term reads
+// through the family's own reader
+function rd_call(c: Ctx, t: T, x: string): string {
+  if (t.k === "u32") {
+    return x;
+  }
+  if (t.k === "app" && !idx_is_lit(t.f.idx, t.arg)) {
+    return rd_fam(c, t.f) + "(" + t.arg + ", " + x + ")";
+  }
+  return rd_ensure(c, t) + "(" + x + ")";
+}
+
+// rd_arm : the body reading x at a type that may mention an index term,
+// inline: a tuple destructures, a function applies, a Maybe or an indexed
+// datatype matches (the tail of the body), the family at the index calls
+// its reader, and a closed type calls its own. No def is minted under the
+// index, so nothing recurses back into the family's reader but itself.
+function rd_arm(c: Ctx, t: T, x: string, ind: string, rebind: string | null = null, plus: string | null = null): string {
+  const pre: string[] = [];
+  const rb = rebind === null ? "" : rebind + "\n";
+  // plus : an expression added to every final expression (a pair's
+  // witness read, beside its evidence's)
+  const add = (e: string): string => plus === null ? e : "(" + e + " + " + plus + " : U32)";
+  const flat = (t2: T, x2: string): string => {
+    if (!ty_open(t2) || t2.k === "app") {
+      return rd_call(c, t2, x2);
+    }
+    if (t2.k === "sig") {
+      pre.push("(" + (idx_type(t2.a) ? "+" : "") + t2.x + ", " + x2 + "e) = " + x2);
+      return "(" + flat(t2.a, t2.x) + " + " + flat(t2.b, x2 + "e") + " : U32)";
+    }
+    if (t2.k === "tup") {
+      const a = x2 + "a";
+      const b = x2 + "b";
+      pre.push("(" + a + ", " + b + ") = " + x2);
+      return "(" + flat(t2.a, a) + " + " + flat(t2.b, b) + " : U32)";
+    }
+    if (t2.k === "fun") {
+      return flat(t2.cod, x2 + "(" + e_at(syn(c, t2.dom, [], 1)) + ")");
+    }
+    throw new Error("rd_arm: not flat: " + ty_str(t2));
+  };
+  const tail = (t2: T, x2: string, ind2: string): string => {
+    if (t2.k === "adt" && t2.a === BASE.Maybe && ty_open(t2)) {
+      const y = x2 + "s";
+      return "match " + x2 + ":\n" + ind2 + "  case None{}:\n" + ind2 + "    " + add(String(1 + c.g.int(99)))
+        + "\n" + ind2 + "  case Some{" + y + "}:\n" + ind2 + "    " + rd_arm(c, t2.args[0], y, ind2 + "    ", rebind, plus);
+    }
+    if (t2.k === "adt" && t2.a.ips !== undefined && ty_open(t2)) {
+      const m = new Map<string, T>();
+      const qm = new Map<string, QT>();
+      const rows = t2.a.ctors.map((ct) => {
+        const vs = ct.fields.map((_, i) => x2 + String(i));
+        const pre2: string[] = [];
+        const parts: string[] = [];
+        ct.fields.forEach((f, i) => {
+          if (f.q === 0) {
+            return;
+          }
+          const ft = adt_field_ty(f.t, t2, m, qm);
+          if (ft.k === "f32" && c.pure) {
+            return;
+          }
+          const saved = pre.length;
+          parts.push(flat(ft, vs[i]));
+          pre2.push(...pre.splice(saved));
+        });
+        parts.push(String(1 + c.g.int(99)));
+        return ind2 + "  case " + ct.name + "{" + vs.join(", ") + "}:\n" + pre2.concat(rebind === null ? [] : [rebind]).map((l) => ind2 + "    " + l + "\n").join("")
+          + ind2 + "    " + add(parts.length > 1 ? "(" + parts.join(" + ") + " : U32)" : parts[0]);
+      });
+      return "match " + x2 + ":\n" + rows.join("\n");
+    }
+    return flat(t2, x2);
+  };
+  const e = tail(t, x, ind);
+  // a match tail carries the re-bind and the addend in its arms; a flat
+  // one takes them last
+  const flatTail = !e.startsWith("match ");
+  return pre.map((l) => l + "\n" + ind).join("") + (flatTail ? rb.replace("\n", "\n" + ind) + add(e) : e);
+}
+
 function rd_ensure(c: Ctx, t: T): string {
   const key = "rd:" + (c.pure ? "p:" : "x:") + ty_str(t);
   const got = c.memo.get(key);
@@ -1430,22 +1967,29 @@ function rd_ensure(c: Ctx, t: T): string {
       case "str": return def1("x: String", helper_strlen(c) + "(x, " + salt() + ")");
       case "unit": return def1("x: Unit", "match x:\n    case Unit{}:\n      " + salt());
       case "tup": {
-        const ra = rd_ensure(c, t.a);
-        const rb = rd_ensure(c, t.b);
-        return def1("x: " + ty_str(t), "(ta, tb) = x\n  (" + ra + "(ta) + " + rb + "(tb) : U32)");
+        return def1("x: " + ty_str(t), "(ta, tb) = x\n  (" + rd_call(c, t.a, "ta") + " + " + rd_call(c, t.b, "tb") + " : U32)");
       }
       case "fun": {
+        if (!ty_inh(t.dom)) {
+          return def1("f: " + ty_grp(t), salt());
+        }
         const app = "f(" + e_at(syn(c, t.dom, [], 1)) + ")";
-        const rc = t.cod.k === "u32" ? null : rd_ensure(c, t.cod);
-        return def1("f: " + ty_grp(t), rc === null ? "(" + app + " + " + salt() + " : U32)" : rc + "(" + app + ")");
+        return def1("f: " + ty_grp(t), t.cod.k === "u32" ? "(" + app + " + " + salt() + " : U32)" : rd_call(c, t.cod, app));
       }
       case "map": {
-        const rv = rd_ensure(c, t.v);
         const sl = helper_strlen(c);
         return def1("m: Map<" + qt_str(t.q) + ", " + ty_grp(t.v) + ">", "match m:\n"
           + "    case MTip{}:\n      " + salt() + "\n"
-          + "    case MLeaf{key, val}:\n      (" + sl + "(key, 3) + " + rv + "(val) : U32)\n"
+          + "    case MLeaf{key, val}:\n      (" + sl + "(key, 3) + " + rd_call(c, t.v, "val") + " : U32)\n"
           + "    case MNode{pos, lo, hi}:\n      (U32.from_nat(pos) + " + name + "(lo) + " + name + "(hi) : U32)");
+      }
+      case "app": return def1("x: " + ty_str(t), rd_fam(c, t.f) + "(" + t.arg + ", x)");
+      case "empty": return def1("x: Empty", "match x:");
+      case "sig": {
+        // the witness re-binds reusable: read on its own, added into the
+        // evidence's read, and named in the evidence's type
+        const ra = rd_call(c, t.a, t.x);
+        return def1("x: " + ty_str(t), "(" + (idx_type(t.a) ? "+" : "") + t.x + ", e) = x\n  " + rd_arm(c, t.b, "e", "  ", null, ra));
       }
       case "adt": return rd_adt(c, name, t);
       default: return def1("x: " + ty_str(t), salt());
@@ -1467,7 +2011,7 @@ function rd_adt(c: Ctx, name: string, t: Extract<T, { k: "adt" }>): string {
       if (f.q === 0) {
         return;
       }
-      const ft = ty_sub(f.t, m, qm);
+      const ft = adt_field_ty(f.t, t, m, qm);
       if (ft.k === "adt" && ft.a === t.a && ty_eq(ft, t)) {
         parts.push(e_atom(name + "(" + vs[i] + ")"));
       } else if (ft.k === "u32") {
@@ -1478,7 +2022,7 @@ function rd_adt(c: Ctx, name: string, t: Extract<T, { k: "adt" }>): string {
         // abstract: cannot fold — dropped (instantiated readers see the
         // concrete type instead)
       } else {
-        parts.push(e_atom(rd_ensure(c, ft) + "(" + vs[i] + ")"));
+        parts.push(e_atom(rd_call(c, ft, vs[i])));
       }
     });
     parts.push(num_lit_u32(c));
@@ -1520,7 +2064,7 @@ function builder_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
       if (is_self(f) && self !== "") {
         return self;
       }
-      const ft = ty_sub(f.t, m, qm);
+      const ft = adt_field_ty(f.t, t, m, qm);
       return e_at(syn(c, ft, ct === base ? [] : senv, 0));
     });
   const brow = base.name + "{" + fld(base, "").join(", ") + "}";
@@ -1567,7 +2111,7 @@ function tf_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
       if (f.q === 0) {
         return vs[i];
       }
-      const ft = ty_sub(f.t, m, qm);
+      const ft = adt_field_ty(f.t, t, m, qm);
       if (ft.k === "adt" && ft.a === a && ty_eq(ft, t)) {
         return name + "(" + vs[i] + ")";
       }
@@ -1753,6 +2297,10 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         [fuel > 0 ? 8 : 0, () => e_atom("SCon{" + e_at(syn(c, CHARC, env, fuel - 1)) + ", " + e_at(syn(c, STRC, env, fuel - 1)) + "}")],
         [fuel > 0 ? 6 : 0, () => e_fn("U32.show", num_gen_u32(c, env, fuel - 1))],
         [fuel > 0 ? 4 : 0, () => e_fn("Nat.show", num_gen_nat(c, env, fuel - 1))],
+        [fuel > 0 && !c.pure ? 3 : 0, () => {
+          c.feat("f32-show");
+          return e_fn("F32.show", num_gen_f32(c, env, fuel - 1));
+        }],
       ])();
     }
     case "tvar": {
@@ -1766,8 +2314,22 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
       throw new Error("no inhabitant for tvar " + goal.n);
     }
     case "eql": {
+      if (!ty_inh(goal)) {
+        throw new Error("no inhabitant: " + ty_str(goal));
+      }
       c.feat("eql");
       return e_atom("{==}");
+    }
+    case "empty": throw new Error("no inhabitant: Empty");
+    case "sig": {
+      // a witness whose evidence has a value, then the evidence
+      const ws = idx_type(goal.a) ? idx_lits(goal.a).filter((w) => ty_inh(ty_tsub(goal.b, goal.x, w))) : [];
+      const w = idx_type(goal.a) ? (ws.length > 0 ? c.g.pick(ws) : null) : e_at(syn(c, goal.a, env, Math.max(0, fuel - 1)));
+      if (w === null) {
+        throw new Error("no inhabitant: " + ty_str(goal));
+      }
+      c.feat("sig-value");
+      return e_atom("(" + w + ", " + e_at(syn(c, ty_tsub(goal.b, goal.x, w), env, Math.max(0, fuel - 1))) + ")");
     }
     case "tup": {
       const intro = (): E => e_atom("(" + e_at(syn(c, goal.a, env, Math.max(0, fuel - 1))) + ", " + e_at(syn(c, goal.b, env, Math.max(0, fuel - 1))) + ")");
@@ -1795,6 +2357,15 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
       ])();
     }
     case "fun": {
+      if (ty_refutable(goal.dom) && !ty_inh(goal.cod)) {
+        // a clash refuted: the rewrite through a discriminating family
+        return e_atom(refute_ensure(c, goal.dom as Extract<T, { k: "eql" }>));
+      }
+      if (ty_refutable(goal.dom)) {
+        c.feat("absurd");
+        const b = "y" + String(c.uid());
+        return e_atom(b + " => Empty.absurd(" + ty_str(goal.cod) + ", " + refute_ensure(c, goal.dom as Extract<T, { k: "eql" }>) + "(" + b + "))");
+      }
       const lam = (): E => {
         const b = "y" + String(c.uid());
         if (goal.q === 0) {
@@ -1838,7 +2409,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         const ctors = fuel <= 0 ? a.ctors.filter((ct) => !ct.fields.some(is_self)) : a.ctors;
         const ct = c.g.pick(ctors.length > 0 ? ctors : [a.ctors[0]]);
         const args = ct.fields.map((f) => {
-          const ft = ty_sub(f.t, m, qm);
+          const ft = adt_field_ty(f.t, goal as Extract<T, { k: "adt" }>, m, qm);
           const sub = is_self(f) ? fuel - 1 : Math.min(fuel - 1, 1);
           // erased and + fields synthesize against a copy-only env: a dead
           // position never consumes, and a + argument is certified once —
@@ -1868,6 +2439,14 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
           return e_atom(els.slice(0, heads).map((e) => e + " <> ").join("") + "[" + els.slice(heads).join(", ") + "]");
         }],
         [a.rec && fuel > 0 && !ty_open(goal) ? 20 : 0, () => builder_call(c, goal as Extract<T, { k: "adt" }>, env, c.pure ? 10 : 16)],
+        // List.map is a template over its element types and its function
+        [is_list && fuel > 0 && !ty_open(goal) && goal.qs[0].k === "q" && goal.qs[0].q === 1 ? 6 : 0, () => {
+          c.feat("list-map");
+          const src = c.g.pick([U32C, BOOLC, NATC]);
+          const y = "y" + String(c.uid());
+          const body = e_at(syn(c, goal.args[0], [v_new(y, src)], Math.max(0, fuel - 1)));
+          return e_atom("List.map(~" + ty_grp(src) + ", ~" + ty_grp(goal.args[0]) + ", ~(" + y + " => " + body + "), " + e_at(syn(c, t_list(Q1, src), env, fuel - 1)) + ")");
+        }],
         [!ty_open(goal) && fuel >= 1 ? 6 : 0, () => {
           c.feat("reuse");
           return e_atom(tf_ensure(c, goal as Extract<T, { k: "adt" }>) + "(" + e_at(syn(c, goal, env, Math.max(0, fuel - 1))) + ")");
@@ -1879,6 +2458,28 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
       // arrays are linear and live in the array kit; a bare goal builds one
       const d = 1 + c.g.int(3);
       return e_fn("Array.new", e_atom(ty_grp(goal.el)), e_atom(String(d) + "n"), syn(c, goal.el, env, 0));
+    }
+    case "app": {
+      // a closed index unfolds to its arm; any index goes through the
+      // family's index-generic def
+      const arm = fam_unfold(goal.f, goal.arg);
+      const total = fam_total(goal.f);
+      if ((arm === null && !total && direct.length === 0) || (arm !== null && !ty_inh(arm))) {
+        throw new Error("no inhabitant: " + ty_str(goal));
+      }
+      return c.g.wpick<() => E>([
+        [var_w, pick_var],
+        [arm !== null && fuel > 0 ? 20 : 0, () => {
+          c.feat("fam-unfold");
+          return syn(c, arm as T, env, fuel - 1);
+        }],
+        [total ? 20 : 0, () => {
+          const mk = mk_fam(c, goal.f);
+          return e_call(mk, mk + "(" + goal.arg + ")");
+        }],
+        [arm !== null && !total ? 20 : 0, () => syn(c, arm as T, env, Math.max(0, fuel - 1))],
+        [total ? 8 : 0, () => uni() ?? e_call("", mk_fam(c, goal.f) + "(" + goal.arg + ")")],
+      ])();
     }
   }
 }
@@ -1894,6 +2495,31 @@ function syn_def_arg(c: Ctx, d: DefR, i: number, t: T, env: V[], fuel: number): 
     return e_at(e_bin(e, "%", e_atom(String(mask))));
   }
   return e_at(e);
+}
+
+// syn_def_args : the value arguments in order; an index parameter that
+// later parameters depend on takes a literal under which every dependent
+// type has a value (null when none does)
+function syn_def_args(c: Ctx, d: DefR, env: V[], fuel: number): string[] | null {
+  const args: string[] = [];
+  let ps = d.ps.slice();
+  for (let i = 0; i < ps.length; i++) {
+    const p = ps[i];
+    const deps = p.n === undefined ? [] : ps.slice(i + 1).filter((q) => ty_str(q.t).includes(p.n as string));
+    if (deps.length > 0 && idx_type(p.t)) {
+      const ok = idx_lits(p.t).filter((w) => deps.every((q) => ty_inh(ty_tsub(q.t, p.n as string, w))));
+      if (ok.length === 0) {
+        return null;
+      }
+      const w = c.g.pick(ok);
+      c.feat("dep-call");
+      args.push(w);
+      ps = ps.map((q, j) => j > i ? { ...q, t: ty_tsub(q.t, p.n as string, w) } : q);
+      continue;
+    }
+    args.push(syn_def_arg(c, { ...d, ps }, i, p.t, env, fuel));
+  }
+  return args;
 }
 
 // syn_call_unify : call any registered def whose return type unifies with
@@ -1932,7 +2558,10 @@ function syn_call_unify(c: Ctx, goal: T, env: V[], fuel: number): E | null {
   } else if (d.tps.length > 0) {
     c.feat("generic-call");
   }
-  const args = ps.map((p, i) => syn_def_arg(c, { ...d, ps }, i, p.t, env, Math.max(0, fuel - 1)));
+  const args = syn_def_args(c, { ...d, ps }, env, Math.max(0, fuel - 1));
+  if (args === null) {
+    return null;
+  }
   const qargs = d.qps.map((qp) => qt_str(qm.get(qp) as QT));
   const targs = d.tps.map((tp) => ty_grp(m.get(tp.n) as T));
   return e_call(d.name, d.name + "(" + qargs.concat(targs, args).join(", ") + ")");
@@ -1953,11 +2582,23 @@ function syn_mint_def(c: Ctx, goal: T, env: V[]): E | null {
   c = c.sub("mint");
   const name = "fn" + String(c.uid());
   const nps = 1 + c.g.int(3);
-  const ps: Array<{ q: BQ; t: T }> = [];
+  const ps: Array<{ q: BQ; t: T; n?: string }> = [];
   for (let i = 0; i < nps; i++) {
+    // evidence about an earlier index parameter: a family at it (the def
+    // is then callable at the indices whose arm has a value)
+    const idxps = ps.filter((p) => p.n !== undefined && p.q === 2 && idx_type(p.t));
+    const fams = idxps.length > 0 ? c.fams.filter((f) => f.done && idxps.some((p) => ty_eq(p.t, f.idx))) : [];
+    if (fams.length > 0 && c.g.chance(0.35)) {
+      c.feat("dep-param");
+      const f = c.g.pick(fams);
+      const on = c.g.pick(idxps.filter((p) => ty_eq(p.t, f.idx)));
+      ps.push({ q: 1, t: { k: "app", f, arg: on.n as string }, n: "p" + String(i) });
+      continue;
+    }
     const t = syn_ty(c, 1, Q0, [], []);
     const q: BQ = c.g.wpick<BQ>([[7, 1], [2, 0], [ty_data(t) ? 3 : 0, 2]]);
-    ps.push({ q, t });
+    // an index parameter re-binds reusable, so evidence about it may follow
+    ps.push({ q: idx_type(t) && q !== 0 ? 2 : q, t, n: "p" + String(i) });
   }
   if (ps.some((p) => p.q === 0)) {
     c.feat("erased-param");
@@ -1980,8 +2621,27 @@ function syn_mint_def(c: Ctx, goal: T, env: V[]): E | null {
   const split = c.g.chance(0.2);
   if (split) {
     c.feat("assert-def");
-    c.push("law " + name + ":\n" + ps.map((p, i) => "  for " + bq_prefix(p.q) + "p" + String(i) + ": " + ty_top(p.t)).join("\n")
-      + "\n  " + ty_top(goal) + "\n\ndef " + name + "(" + ps.map((_, i) => "p" + String(i)).join(", ") + "):\n  " + e_at(body));
+    // a law telescope: a pair parameter over an index may read as `for x: A
+    // where B`, the def then opening the pair; a pair result as `exs`
+    // a `where` row names the pair's witness; the def's parameter is the
+    // pair itself, as base's own where-laws take it
+    const rows: string[] = [];
+    ps.forEach((p, i) => {
+      const pn = "p" + String(i);
+      if (p.t.k === "sig" && p.q === 1 && idx_type(p.t.a) && c.g.chance(0.6)) {
+        c.feat("law-where");
+        rows.push("  for " + pn + ": " + ty_top(p.t.a) + " where " + ty_str(ty_tsub(p.t.b, p.t.x, pn)));
+        return;
+      }
+      rows.push("  for " + bq_prefix(p.q) + pn + ": " + ty_top(p.t));
+    });
+    let claim = ty_top(goal);
+    if (goal.k === "sig" && c.g.chance(0.6)) {
+      c.feat("law-exs");
+      rows.push("  exs " + goal.x + ": " + ty_top(goal.a));
+      claim = ty_top(goal.b);
+    }
+    c.push("law " + name + ":\n" + rows.join("\n") + "\n  " + claim + "\n\ndef " + name + "(" + ps.map((_, i) => "p" + String(i)).join(", ") + "):\n  " + e_at(body));
   } else {
     const unsafe = c.g.chance(0.06);
     if (unsafe) {
@@ -1991,7 +2651,10 @@ function syn_mint_def(c: Ctx, goal: T, env: V[]): E | null {
   }
   const d: DefR = { name, qps: [], tps: [], ps, ret: goal };
   c.defr.push(d);
-  const args = ps.map((p, i) => syn_def_arg(c, d, i, p.t, env, 1));
+  const args = syn_def_args(c, d, env, 1);
+  if (args === null) {
+    return null;
+  }
   return e_call(name, name + "(" + args.join(", ") + ")");
 }
 
@@ -2473,7 +3136,7 @@ function let_map(c: Ctx, _env: V[]): Line {
   for (const k of keys) {
     acc = "Map.set(" + qs + ", " + vs + ", " + acc + ", " + k + ", " + e_at(syn(c, vT, [], 1)) + ")";
   }
-  const style = c.g.wpick<string>([[3, "rd"], [2, "has"], [2, "pop"], [qt_known(q) === 2 && vT.k === "u32" ? 3 : 0, "get"], [1, "set-kit"]]);
+  const style = c.g.wpick<string>([[3, "rd"], [2, "has"], [2, "pop"], [qt_known(q) === 2 && vT.k === "u32" ? 3 : 0, "get"], [1, "set-kit"], [2, "del"], [2, "keys"], [2, "from-list"]]);
   const lines: string[] = [];
   if (style === "has") {
     const k1 = "mh" + id;
@@ -2498,7 +3161,23 @@ function let_map(c: Ctx, _env: V[]): Line {
     for (const k of keys.slice(0, 3)) {
       sacc = "Set.add(" + sacc + ", " + k + ")";
     }
+    // a deletion before the probe, of a present or an absent key
+    if (c.g.chance(0.5)) {
+      c.feat("set-del");
+      sacc = "Set.del(" + sacc + ", " + (c.g.chance(0.6) ? c.g.pick(keys) : str_lit(c, 2)) + ")";
+    }
     lines.push(x + " = " + k1 + "(Set.has(" + sacc + ", " + c.g.pick(keys) + "))");
+  } else if (style === "del") {
+    c.feat("map-del");
+    lines.push(x + " = " + rdM + "(Map.del(" + qs + ", " + vs + ", " + acc + ", " + (c.g.chance(0.6) ? c.g.pick(keys) : str_lit(c, 2)) + "))");
+  } else if (style === "keys") {
+    c.feat("map-keys");
+    const lt = t_list(Q2, STRC);
+    lines.push(x + " = " + rd_ensure(c, lt) + "(Map.keys(" + qs + ", " + vs + ", " + acc + "))");
+  } else if (style === "from-list") {
+    c.feat("map-from-list");
+    const pairs = keys.map((k) => "(" + k + ", " + e_at(syn(c, vT, [], 1)) + ")");
+    lines.push(x + " = " + rdM + "(Map.from_list(" + qs + ", " + vs + ", [" + pairs.join(", ") + "]))");
   } else {
     lines.push(x + " = " + rdM + "(" + (c.g.chance(0.3) ? "Map.union(" + qs + ", " + vs + ", " + acc + ", Map.new(" + qs + ", " + vs + "))" : acc) + ")");
   }
@@ -2618,40 +3297,6 @@ function let_shared(c: Ctx, env: V[]): Line {
     y + " = (" + s + " + " + x + " : U32)",
   ];
   return { text: lines.join("\n  "), binds: [y], vars: [] };
-}
-
-// Dep kit
-// -------
-// Large elimination: a Nat-indexed family uf : Nat -> Type with a section
-// pick : @n -> uf(n) and a transport hop consuming uf(k) at both indices —
-// the checker specializes the context type per arm (probed against HEAD).
-
-function let_dep(c: Ctx, env: V[]): Line {
-  c.feat("dep");
-  const id = String(c.uid());
-  const fam = "uf" + id;
-  const pick = "up" + id;
-  const hop = "uh" + id;
-  const left = c.g.pick([U32C, BOOLC, STRC]);
-  let right = c.g.pick([U32C, NATC, CMPC]);
-  if (ty_eq(left, right)) {
-    right = NATC;
-  }
-  c.push("def " + fam + "(n: Nat) -> Type:\n  match n:\n    case 0n:\n      " + ty_str(left) + "\n    case 1n+p:\n      " + ty_str(right));
-  c.push("def " + pick + "(n: Nat) -> " + fam + "(n):\n  match n:\n    case 0n:\n      "
-    + e_at(syn(c, left, [], 1)) + "\n    case 1n+p:\n      " + e_at(syn(c, right, [], 1)));
-  const rdl = left.k === "u32" ? null : rd_ensure(c, left);
-  const rdr = right.k === "u32" ? null : rd_ensure(c, right);
-  c.push("def " + hop + "(k: Nat, v: " + fam + "(k)) -> U32:\n  match k:\n    case 0n:\n      "
-    + (rdl === null ? "(v + 1 : U32)" : rdl + "(v)") + "\n    case 1n+q:\n      " + (rdr === null ? "(v * 2 : U32)" : rdr + "(v)"));
-  const use = "ud" + id;
-  c.push("def " + use + "(+n: Nat) -> U32:\n  " + hop + "(n, " + pick + "(n))");
-  c.defr.push({ name: use, qps: [], tps: [], ps: [{ q: 2, t: NATC }], ret: U32C, mask: [4] });
-  const x = "v" + String(c.uid());
-  return {
-    text: x + " = " + use + "(U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % 4 : U32)))",
-    binds: [x], vars: [],
-  };
 }
 
 // Ford kit
@@ -2789,20 +3434,35 @@ function hof_call(c: Ctx, env: V[]): E {
   c.push("def " + name + "(+a: U32, +b: U32, c: U32) -> U32:\n  " + e_at(num_combine(c, [e_atom("a"), e_atom("b"), e_atom("c"), num_lit_u32(c)])));
   c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: U32C }, { q: 2, t: U32C }, { q: 1, t: U32C }], ret: U32C });
   const hf = "hg" + id;
-  c.push("def " + hf + "(f: U32 -> U32, +x: U32) -> U32:\n  (f(x) + x : U32)");
-  c.defr.push({ name: hf, qps: [], tps: [], ps: [{ q: 1, t: { k: "fun", q: 1, dom: U32C, cod: U32C } }, { q: 2, t: U32C }], ret: U32C });
-  if (c.g.chance(0.5)) {
+  // a template parameter is substituted at compile time: its argument is
+  // closed (a lambda over its own binder, or a unary def), and the def is
+  // not a plain callable of the registry
+  const tmpl = c.g.chance(0.35);
+  if (tmpl) {
+    c.feat("template");
+    c.push("def " + hf + "(~f: U32 -> U32, +x: U32) -> U32:\n  (f(x) + x : U32)");
+  } else {
+    c.push("def " + hf + "(f: U32 -> U32, +x: U32) -> U32:\n  (f(x) + x : U32)");
+    c.defr.push({ name: hf, qps: [], tps: [], ps: [{ q: 1, t: { k: "fun", q: 1, dom: U32C, cod: U32C } }, { q: 2, t: U32C }], ret: U32C });
+  }
+  if (!tmpl && c.g.chance(0.5)) {
     c.feat("partial");
     // a def value at exactly live-1 arguments
     return e_atom(hf + "(" + name + "(" + e_at(num_gen_u32(c, env, 1)) + ", " + e_at(num_gen_u32(c, env, 1)) + "), " + e_at(num_gen_u32(c, env, 1)) + ")");
   }
+  const unary = c.defr.filter((d) => d.qps.length === 0 && d.tps.length === 0 && d.ps.length === 1 && d.ps[0].q === 1 && d.ps[0].t.k === "u32" && d.ret.k === "u32" && (d.mask?.[0] ?? null) === null);
+  if (tmpl && unary.length > 0 && c.g.chance(0.4)) {
+    c.feat("template-def");
+    return e_atom(hf + "(~" + c.g.pick(unary).name + ", " + e_at(num_gen_u32(c, env, 1)) + ")");
+  }
   const b = "y" + id;
-  const plus = c.g.chance(0.5);
+  // a template's lambda takes no + binder (the parser reads ~( as a term)
+  const plus = !tmpl && c.g.chance(0.5);
   if (plus) {
     c.feat("plus-lam");
   }
   const lam = (plus ? "+" : "") + b + " => " + e_at(num_gen_u32(c, [v_new(b, U32C, plus)], plus ? 2 : 1));
-  return e_atom(hf + "(" + lam + ", " + e_at(num_gen_u32(c, env, 1)) + ")");
+  return e_atom(hf + "(" + (tmpl ? "~(" + lam + ")" : lam) + ", " + e_at(num_gen_u32(c, env, 1)) + ")");
 }
 
 // let_float : an F32 chain folded through exact conversions — compiled
@@ -2874,6 +3534,7 @@ function show_seed(seed: bigint): boolean {
 
 function ty_showable(t: T, depth = 0): boolean {
   switch (t.k) {
+    case "empty": case "sig": case "eql": return false;
     case "u32": case "nat": case "bool": case "char": case "str": case "unit": return true;
     case "tup": return t.q === 1 && ty_showable(t.a, depth + 1) && ty_showable(t.b, depth + 1);
     case "arr": return t.el.k === "u32";
@@ -2882,7 +3543,7 @@ function ty_showable(t: T, depth = 0): boolean {
         // a Data element: a lone tuple is a Type, so none rides inside
         return t.qs.length === 1 && t.qs[0].k === "q" && t.qs[0].q === 2 && ty_data(t.args[0]) && ty_showable(t.args[0], depth + 1);
       }
-      if (t.a.base === true || t.a.qps.length > 0 || t.a.tps.length > 0 || t.a.ctors.length === 0 || !ty_data(t)) {
+      if (t.a.base === true || t.a.qps.length > 0 || t.a.tps.length > 0 || t.a.ips !== undefined || t.a.ctors.length === 0 || !ty_data(t)) {
         return false;
       }
       return depth < 3 && t.a.ctors.every((ct) => ct.fields.every((f) =>
@@ -3209,8 +3870,9 @@ function io_tail(c: Ctx, seed: bigint): IoTail {
       + "    case Fail{e}:\n      (c, m) = e\n      do IO<U32>:\n        u4 : Unit <- File.close(f)\n        IO.pure(U32, c)");
     const io = "fio" + id;
     c.push("def " + io + "() -> IO(U32):\n  do IO<U32>:\n"
-      + "    r : Result<&1, &1, U32 & String, File> <- File.open(\"" + fn + "\", \"w\")\n"
-      + "    f : File <- IO.pass(File, r)\n"
+      + (c.g.chance(0.5)
+        ? "    r : Result<&1, &1, U32 & String, File> <- File.open(\"" + fn + "\", \"w\")\n    f : File <- IO.pass(File, r)\n"
+        : (c.feat("io-try"), "    f : File <- IO.try(File, File.open(\"" + fn + "\", \"w\"))\n"))
       + "    wr : File & Result<&1, &1, U32 & String, Unit> <- File.write(f, \"" + txt + "\")\n"
       + "    " + wk + "(wr)");
     lines.push("t" + id + "b : U32 <- " + io + "()");
@@ -3275,6 +3937,15 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
   for (let i = 0; i < nadts; i++) {
     adt_new(c.sub("adt"));
   }
+  // families after the datatypes (an arm may use them), then a datatype
+  // after the families (a field may apply one)
+  const nfams = c.g.chance(0.35) ? 1 + c.g.int(2) : 0;
+  for (let i = 0; i < nfams; i++) {
+    fam_new(c.sub("fam"));
+  }
+  if (nfams > 0 && c.g.chance(0.5)) {
+    adt_new(c.sub("adt"));
+  }
   c.pure = true;
   if (show_seed(seed)) {
     c.feat("show");
@@ -3300,7 +3971,6 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
     [4, let_eql],
     [3, theorem_gen],
     [3, let_eqkit],
-    [4, let_dep],
     [3, let_ford],
   ];
   // swarm : per-seed multipliers reshape the weight table so rare kinds
@@ -3523,7 +4193,7 @@ async function worker_main(): Promise<void> {
   // base book seeded once per process (test.ts's own pattern): clone the
   // tlds shallowly per request and skip base's entries in book_valid
   const BASE_PATH = fs.realpathSync(path.join(ROOT, "bend2", "base.bend"));
-  let base_book: { tlds: Record<string, unknown>; ctrs: Record<string, unknown>; order: string[]; hols: number } | null = null;
+  let base_book: { tlds: Record<string, unknown>; ctrs: Record<string, unknown>; order: string[]; hols: number; tmps: Record<string, unknown> } | null = null;
   const base_seed = async (): Promise<typeof base_book> => {
     if (base_book === null) {
       const b = bend.book_nil();
@@ -3538,11 +4208,20 @@ async function worker_main(): Promise<void> {
   const book_of = async (src: string): Promise<{ book?: unknown; err?: string; skip?: string }> => {
     const book = bend.book_nil();
     try {
-      const base = await base_seed() as { tlds: Record<string, unknown>; ctrs: Record<string, unknown>; order: string[] };
+      const base = await base_seed() as { tlds: Record<string, unknown>; ctrs: Record<string, unknown>; order: string[]; tmps: Record<string, unknown> };
       for (const k of Object.keys(base.tlds)) {
         book.tlds[k] = { ...(base.tlds[k] as Record<string, unknown>) };
       }
       Object.assign(book.ctrs, base.ctrs);
+      // the templates too: the parser reads a ~ argument off the callee's
+      // template descriptor (List.map's), and registers each instance in
+      // the descriptor's own table, so every request gets a fresh one
+      // an instance parses through the descriptor's own parser state, into
+      // ITS book: re-point it at this request's book, or base's fills up
+      for (const k of Object.keys(base.tmps)) {
+        const tm = base.tmps[k] as { p: Record<string, unknown>; is: Record<string, string> };
+        book.tmps[k] = { ...tm, p: { ...tm.p, book }, is: { ...tm.is } };
+      }
       book.order.push(...base.order);
       bend.parse_book(book, ROOT + "/", src.replace(/^import Base$/m, ""), "");
       bend.book_valid(book, base.order.length);
@@ -4317,7 +4996,7 @@ async function fuzz_run(): Promise<void> {
   }
   // smoke : hand-verified per-feature cover (re-pick after any edit that
   // remaps seeds: each seed passes solo and the union covers smoke_need)
-  const smoke = [23n, 43n, 49n, 57n, 59n, 121n, 125n, 128n, 150n, 152n, 165n, 176n, 186n];
+  const smoke = [10n, 17n, 18n, 24n, 28n, 31n, 39n, 43n, 52n, 58n, 63n, 78n, 87n, 124n, 133n, 140n, 157n, 176n, 185n, 186n, 202n, 262n];
   const fixed = SMOKE ? smoke : null;
   const count = fixed?.length ?? COUNT;
   const lanes = "interp+cseq+js" + (THREADS > 0 ? "+par" + String(THREADS) : "") + (WITH_METAL ? "+metal" : "") + (WITH_CUDA ? "+cuda" : "");
@@ -4395,7 +5074,10 @@ async function fuzz_run(): Promise<void> {
   const smoke_need = ["qpoly-def", "qpoly-call", "kind-qvar", "kind-meet", "adt-data", "adt-qpoly",
     "erased-field", "erased-param", "f32-arith", "f32-trans", "f32-conv", "nat-table", "peel",
     "array-ops", "map-ops", "string-append", "match-adt", "do-maybe", "do-result", "fork", "bang",
-    "tail-nat", "tail-list", "tail-str", "tail-adt", "eql", "rwt", "thm", "dep", "ford", "share", "partial", "io-tail",
+    "tail-nat", "tail-list", "tail-str", "tail-adt", "eql", "rwt", "thm", "ford", "share", "partial", "io-tail",
+    "fam-nat", "fam-bool", "fam-enum", "fam-use", "fam-unfold", "fam-mk", "fam-rd", "adt-indexed",
+    "sig", "sig-value", "empty", "eql-clash", "eql-ne", "refute", "dep-param", "dep-call", "law-where", "or", "pair",
+    "template", "f32-bits", "f32-showread", "f32-show", "map-del", "map-keys", "map-from-list", "set-del", "list-map", "io-try",
     "async", "fiber", "timer", "chan",
     "seal-add", "seal-xor", "seal-dist", "seal-mask", "seal-cmp", "seal-rot",
     "plus-pat", "cons-pat", "list-pat", "plus-par", "plus-lam", "plus-do", "do-let", "plus-tup",
