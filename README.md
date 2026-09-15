@@ -11,16 +11,30 @@ spellings (raw and identity-sealed) and cross-checks every leg:
   Word code, so this leg is also a bit-level spec differential against the
   native ops the backends substitute.
 - **C** (`compile_book`): one standalone `.c` built with clang, run
-  sequentially (`--parallel off`); optional lanes on top: CPU parallelism
+  sequentially (`--threads 1 --gpu off`); optional lanes on top: CPU parallelism
   (`--threads N`), Metal (`--metal`, macOS) and CUDA (`--cuda`, Linux +
   NVIDIA), both run `--gpu on`.
 - **JS** (`js_book`): the emitted `.js` run under bun.
+- **show** (`--show-pct`, 8% of seeds): a solo program whose `main` is
+  pure, `def main() -> T: v` over a printable type (scalars, tuples, List,
+  Maybe, a program datatype, an Array of U32). The C and JS runtimes
+  compute it and print it as a literal at run time; the interpreter's
+  `term_show` of the normal form is the expectation.
 
 Programs carry a compiled-only `extra` def (F32 — stuck in the interpreter
 by design — deep fork trees with `!` marks, long loops) compared across the
 compiled legs with the sequential C run as reference, and an optional
 deterministic IO tail in `main` (file roundtrip, `get_env`, `print_err`,
-`IO.die` exit codes) compared by exact stdout/stderr/exit.
+`IO.die` exit codes) compared by exact stdout/stderr/exit. A tail may also
+carry an async walk: main forks fibers (a value, a sleep, a batch
+computation, a producer sending into a channel), spawns detached producers,
+receives from channels, reads the clock, registers timer groups, and joins,
+in a random order that a model keeps schedule-independent (a receive is a
+FIFO prefix from one producer or the whole pending sum from several, a
+producer is joined once its sends are received, an epilogue drains, closes
+and joins everything). The compiled legs compare it among themselves with
+no interpreter leg; its prints and answer are known to the generator, or
+cross-leg where a batch value rides in.
 
 Any disagreement, rejection of generated source, internal crash, or C run
 that outlives its cap while the interpreter finished (livelock suspect) is a
@@ -53,6 +67,7 @@ bun ../bend2-fuzzer/fuzz.ts [count] [--seed N] [options]
 | `--cuda` | also build with `-DBEND_CUDA` and run `--gpu on` (Linux + NVIDIA) |
 | `--opt N` | clang `-O` level for the C legs (default 1) |
 | `--io-pct N` | percent of seeds carrying an IO tail (default 20) |
+| `--show-pct N` | percent of seeds that are a pure `main` printed as its literal (default 8) |
 | `--check-only` | stop after check + interp + emission (no cc, no runs) |
 | `--smoke` | fixed seed set that must cover a feature checklist and pass |
 | `--loop` | run continuously |
@@ -78,7 +93,13 @@ loops descend on any chain-shaped data (at most one self field per
 constructor): the program's own such ADTs, base's List at any element
 type (the generic ADT path where Nat takes the native), a String, or a
 Nat; the fuel value is synthesized like any other, so loops run over data
-the program already builds.
+the program already builds. The 2026-09 surface is covered: `+` on any
+binder (case fields, variable rows, tuple lets, parallel lets, lambdas,
+do binds and do lets), `h <> t` in terms and patterns, list literal
+patterns with a `_` row, array literals `[x : T*n]` / `[x : T^d]` and the
+`a[i] <- v` statement, bare do steps and `;`, `\u{hex}` escapes,
+`File.read_bytes` read back through a cons-pattern walk, and twin
+arguments `f(x, x)` for the borrow machinery.
 
 ## Batching
 

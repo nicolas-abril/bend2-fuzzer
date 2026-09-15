@@ -36,11 +36,49 @@ New in this rewrite, in step with the toolchain:
   IO.die) are deterministic, so a probabilistic IO tail rides main's
   do-block on ordinary seeds and compares by exact stdout/stderr/exit.
   TCP/UDP are not generated (ports/routing are not deterministic).
+- **Async is a modeled walk, not a race**: a tail's async part is a random
+  walk of main's do-block over fibers, channels and timers, and a model
+  keeps its answer schedule-independent: a receive takes the FIFO prefix
+  when every pending value is one producer's and the whole pending sum
+  (commutative) when several producers raced; a producer is joined only
+  once its sends are received (a full channel would deadlock the join);
+  a timer group registers in deadline order, since the loop stamps each
+  timer with a strictly later deadline; the epilogue drains and closes
+  every channel and joins every fiber. Only timer pings print, and main
+  prints after joining them, so no two fibers' prints can interleave. The
+  compiled legs compare it among themselves; the interpreter never runs
+  it. Sockets stay out: `UDP.bind` takes a port and parallel jobs would
+  collide.
 - **The GPU lanes**: `--metal` / `--cuda` build the SAME emitted `.c` with
   the platform flags and run `--gpu on`; `--threads N` adds the CPU-par
   lane on the sequential binary. GPU runs are serialized; a GPU binary
   re-reads its `.c` at the compiled path, so build dirs live until the run
   ends.
+
+Ported to main `627df664` on 2026-09-15 (the port that followed the
+2026-09-10 run):
+
+- **Breakages fixed**: `term_show` prints a closed U32 as its decimal
+  (the worker decoded a `U32{WCon{..}}` chain); `Chan<A>` is `Chan(A)`
+  (a law family applies with parens; the record handle types are gone
+  with the handle table); the runtime CLI lost `--parallel`, so the
+  sequential lane is `--threads 1 --gpu off`.
+- **New surface generated**: `+` on any binder (a case field in
+  `adt_row`, a parallel let in `let_fork`, a lambda in `hof_call`, a do
+  bind and a do let in `do_call_def`, a tuple let in `let_array`),
+  `h <> t` / `[]` rows for List, list literal patterns with a `_` row
+  (`match_list_def`), a cons chain ending in a list literal, array
+  literals and the `a[i] <- v` statement (`let_array`), bare do steps
+  and `;` in the IO tail, `\u{hex}` escapes in `str_char`,
+  `File.read_bytes` summed through a cons-pattern walk, twins `f(x, x)`
+  in `let_shared`.
+- **The show leg**: a pure `main` now really runs on the C and JS
+  runtimes and prints its value through a new printer per runtime
+  (`show_val` over a descriptor of main's type), so `--show-pct` seeds
+  are solo `def main() -> T: v` programs over printable types, the
+  interpreter's literal the expectation. A tuple is a Type, so none
+  rides inside a List or Maybe (a Data element); the checker refuses
+  it. Erased or dependent fields cannot be printed and are kept out.
 
 Restructured on 2026-09-02:
 
@@ -91,10 +129,22 @@ built around them:
 - Lone binders are consumed at most once (dropping is fine — affine); `+`
   forms only at concretely-Data types; a `+` scrutinee makes its pattern
   binders Many; a plain-arrow lambda binder is Lone whatever its type's
-  kind. Parallel-let binders take NO sigil (always Lone), so fork results
-  are fold-only, and their rider values must be bare var atoms (a
-  parenthesized rider would glue onto the preceding call as a spaced
-  suffix; a literal rider cannot infer).
+  kind. A `+` marks any binder reusable: a case field (`K{+x}`), a
+  variable row (`case +y:`), a tuple or constructor let, one per name of
+  a parallel let (`+a +b = f g`), a lambda (`+x => e`), a do bind and a
+  do let; the re-bind sinks below a run of leading destructures and into
+  every arm of a heading match. A `+x` in a term position is an error.
+  Fork rider values must be bare var atoms (a parenthesized rider would
+  glue onto the preceding call as a spaced suffix; a literal rider cannot
+  infer).
+- `h <> t` is the cons in terms and patterns (`+h <> t` marks the head),
+  `[]` the empty list, `[a, b]` a literal pattern, `_` a wildcard row;
+  `[x : T*n]` (n a literal power of two, the slot count) and `[x : T^d]`
+  (a depth) build arrays; `a[i] <- v` followed by a statement at its
+  column (or a `;`) is `a = a[i] <- v`; a bare term in a do block is a
+  step (`Unit <- term`) and `;` joins two on a line. An opaque handle
+  (File, Socket, Listener, Window, Audio, Chan) is a law with no
+  constructor and no field: never build or match one; `Chan(A)`.
 - A bare literal (U32/F32/Nat/ctor/tuple/list) in a LET VALUE cannot
   infer: `x = {v : T}`. Do-binds are annotated (`x : T <- act`).
   Negative float literals do not exist (`-3.5` heads a binder): spell
@@ -121,7 +171,7 @@ built around them:
   meet accepts either side, a stuck target licenses only an identical
   term. Ctor field kinds must fit the declared G.
 
-## Known noise and open compiler bugs (2026-09-10)
+## Known noise and open compiler bugs (2026-09-15)
 
 Remove entries here when the bends are fixed — every live finding class
 drowns real signal. Delta-reduced repros for all of these sit in
@@ -162,9 +212,10 @@ drowns real signal. Delta-reduced repros for all of these sit in
   regression-covered by `reg_ctr_packed_char.bend`. Of the two finder
   seeds, 8559387686525276681 turned out to be the erased-arrow class
   below (which also fires as a C hang), not this one.
-- **`compiler-crash` packed-ctr-var-arg**: OPEN, and the only compiler
-  class the generator reached in the 2026-09-10 run (4 findings in 126k
-  seeds). A constructor whose own node layout is one machine word,
+- ~~`compiler-crash` packed-ctr-var-arg~~: FIXED by 2026-09-15 — the
+  repro builds on main `627df664` (borrow inference was rebuilt as a
+  monotone fixpoint in `03b50532`). It was the only compiler class the
+  generator reached in the 2026-09-10 run (4 findings in 126k seeds). A constructor whose own node layout is one machine word,
   belonging to a boxed datatype, with its field spelled as a VARIABLE,
   passed to a def that matches on it: the C emitter dies with `an
   unbound binder: X` (X follows the variable). Introduced by bend2-core
@@ -173,7 +224,15 @@ drowns real signal. Delta-reduced repros for all of these sit in
   interpreter and the JS backend all accept it. Repro
   `repros/comp_packed_ctr_var_arg.bend`, details in
   `TRIAGE-2026-09-10.md`.
-- **`Nat.read` is uninterpretable** since bend2-core `77eff95`
+- **The 2026-09-15 run** on `627df664` (45 minutes, 13,250 seeds,
+  `--threads 4`, 4.9 seeds/s): no compiler finding. Its 7 failures were
+  generator rejects of the port (a lambda as a cons head swallows the
+  chain as its body; a nested match on a `+`-marked field binder), both
+  fixed in the generator the same day. 227 skips, 204 of them programs
+  that call `Nat.read` (below).
+- **`Nat.read` is still uninterpretable** on 2026-09-15: 1.7% of seeds
+  skip on `raw-worker-timeout`, nine tenths of them `nat-showread`
+  programs. Since bend2-core `77eff95`
   (2026-09-08): its overflow guard builds 2^48-1 as a unary Peano Nat
   (`Nat.read.max`) per digit. Native on the compiled lanes, fatal under
   the interpreter's structural evaluation. This is NOT a finding (rule
