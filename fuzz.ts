@@ -2412,9 +2412,14 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
           if (cands.length === 0) {
             return lam();
           }
-          c.feat("partial");
           const d = c.g.pick(cands);
-          const front = d.ps.slice(0, -1).map((p, i) => syn_def_arg(c, d, i, p.t, env, Math.max(0, fuel - 1)));
+          // the front is drawn as a call's arguments are (an index chosen and
+          // substituted into the parameters it types), short of the last
+          const front = syn_def_args(c, { ...d, ps: d.ps.slice(0, -1) }, env, Math.max(0, fuel - 1));
+          if (front === null) {
+            return lam();
+          }
+          c.feat("partial");
           return e_atom(front.length > 0 ? d.name + "(" + front.join(", ") + ")" : d.name);
         }],
       ])();
