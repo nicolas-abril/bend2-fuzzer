@@ -94,7 +94,13 @@ loops descend on any chain-shaped data (at most one self field per
 constructor): the program's own such ADTs, base's List at any element
 type (the generic ADT path where Nat takes the native), a String, or a
 Nat; the fuel value is synthesized like any other, so loops run over data
-the program already builds. Types are terms: the generator also mints
+the program already builds. Every def with control flow comes from one
+production: parameters drawn as types, a match over some of them, leaves
+synthesized against the goal, and a self-call allowed only on a
+sub-field of the decreasing column, so loops over state records,
+tuple-returning walks, tree recursion, multi-scrutinee matches and IO
+loops are the same thing at different goals. Binder names come from a small pool and
+sometimes shadow a name in scope, so name resolution is exercised too. Types are terms: the generator also mints
 families, type-level defs by match on an index (`law F: for x: Nat;
 Data` filled by `def F(x): match x: ..`), whose arms may be datatypes
 indexed by the arm's sub-index and holding the family at it (Word's

@@ -70,10 +70,17 @@
 //     ("a structural view of a machine word") — never emitted here, though
 //     the JS emitter accepts them (asymmetry is by design, not a finding).
 //   - defs are emitted in creation = dependency order; no forward refs.
-//   - recursion descends structurally on the FIRST live column: any chain
-//     adt (at most one self field per constructor) serves as a loop's
-//     fuel, the program's own or base's List, beside a Nat or a String; @unsafe
-//     opts out of descent and is emitted rarely.
+//   - a self-call shrinks at the first live argument that changes: every
+//     live argument before it passes through unchanged (the parameter, or
+//     the variable row that re-bound it), the shrinking one is a sub-field
+//     bound by a constructor pattern (a variable row binds the whole value,
+//     which does not shrink), later ones are free; @unsafe opts out of
+//     descent and is emitted rarely.
+//   - a nested match scrutinizes the last binder of the enclosing row's
+//     last column, a field binder (a variable row's binder after literal
+//     rows is a known constructor and cannot be matched again), never a +
+//     binder; one row's binders are distinct; a binder of a descending
+//     column never shadows a name in scope.
 //   - non-inferable values in let position ride `x = {v : T}` annotations;
 //     do-binds are annotated (`x : T <- act`); partial applications stop at
 //     exactly live-1 arguments (deeper partials die in js_book).
@@ -111,6 +118,22 @@
 // where P(x)` and a pair result reads `exs`. None of this is a kit: the
 // same syn/syn_ty/rd productions serve every type, so a Vec, a Word, an
 // IsZero, an Exists and their compositions emerge from one generator.
+//
+// DEFS ARE ONE PRODUCTION. def_new(c, goal, env, fuel) mints every def with
+// control flow: parameters drawn as types (a state parameter of the goal's
+// own type a third of the time), a match at the head of the body over
+// some of them (a decision tree over their constructors, a variable row
+// where an arm does not care, a nested match on a row's last binder), each
+// leaf synthesized by syn against the goal under the row's binders. The
+// def sits in the registry while its leaves are drawn and may call itself
+// only with a sub-field of its decreasing column, each once per leaf, so a
+// countdown loop, a fold, a tree recursion (two self-calls in a parallel
+// let, `!`-marked at times), a record rebuilt each step, a tuple-returning
+// walk and an IO loop are the same production at different goals; a
+// monadic goal (IO, Maybe, Result) may take a do-block leaf; a
+// loop-flavoured def ends every recursive leaf in a tail self-call and
+// counts down a long Nat. Arrays are a type like any other (a parameter, a
+// field, a goal), linear, read and measured through pairs.
 //
 // Primitives with special compilation (comp.ts OPERATIONS/OPTIMIZED and
 // base.bend's native claims) are all reachable: the full U32/F32/Nat op
@@ -489,6 +512,7 @@ type T =
   | { k: "tup"; a: T; b: T; q: 1 | 2; spell?: "pair" }
   | { k: "fun"; q: BQ; dom: T; cod: T }
   | { k: "arr"; el: T }
+  | { k: "io"; t: T }
   | { k: "map"; q: QT; v: T }
   | { k: "eql"; t: T; side: string; rhs?: string; spell?: "ne" };
 // Propositions are types: Empty has no value, {a == b : T} has one when the
@@ -661,6 +685,7 @@ function ty_str(t: T): string {
       return dom + " " + ty_str(t.cod);
     }
     case "arr": return "Array<" + ty_grp(t.el) + ">";
+    case "io": return "IO(" + ty_str(t.t) + ")";
     case "map": return "Map<" + qt_str(t.q) + ", " + ty_grp(t.v) + ">";
     case "eql": return "{" + t.side + (t.spell === "ne" ? " != " : " == ") + (t.rhs ?? t.side) + " : " + ty_str(t.t) + "}";
   }
@@ -706,6 +731,7 @@ function ty_quant(t: T): QT {
     case "tup": return t.q === 2 ? Q2 : Q1;
     case "fun": return Q1;
     case "arr": return Q1;
+    case "io": return Q1;
     case "map": return t.q;
     case "app": return t.f.kind;
     case "empty": return Q2;
@@ -758,6 +784,7 @@ function ty_sub(t: T, m: Map<string, T>, qm: Map<string, QT>): T {
     case "tup": return { k: "tup", a: ty_sub(t.a, m, qm), b: ty_sub(t.b, m, qm), q: t.q, spell: t.spell };
     case "fun": return { k: "fun", q: t.q, dom: ty_sub(t.dom, m, qm), cod: ty_sub(t.cod, m, qm) };
     case "arr": return { k: "arr", el: ty_sub(t.el, m, qm) };
+    case "io": return { k: "io", t: ty_sub(t.t, m, qm) };
     case "map": return { k: "map", q: qt_sub(t.q, qm), v: ty_sub(t.v, m, qm) };
     default: return t;
   }
@@ -773,6 +800,7 @@ function ty_tsub(t: T, n: string, e: string): T {
     case "sig": return t.x === n ? t : { k: "sig", x: t.x, a: ty_tsub(t.a, n, e), b: ty_tsub(t.b, n, e), spell: t.spell };
     case "fun": return { k: "fun", q: t.q, dom: ty_tsub(t.dom, n, e), cod: ty_tsub(t.cod, n, e) };
     case "arr": return { k: "arr", el: ty_tsub(t.el, n, e) };
+    case "io": return { k: "io", t: ty_tsub(t.t, n, e) };
     case "map": return { k: "map", q: t.q, v: ty_tsub(t.v, n, e) };
     default: return t;
   }
@@ -790,6 +818,7 @@ function ty_open(t: T): boolean {
     case "tup": return ty_open(t.a) || ty_open(t.b);
     case "fun": return ty_open(t.dom) || ty_open(t.cod);
     case "arr": return ty_open(t.el);
+    case "io": return ty_open(t.t);
     case "map": return qt_known(t.q) === null || ty_open(t.v);
     default: return false;
   }
@@ -841,6 +870,9 @@ function ty_unify(pat: T, goal: T, m: Map<string, T>, qm: Map<string, QT>): bool
   if (pat.k === "arr" && goal.k === "arr") {
     return ty_unify(pat.el, goal.el, m, qm);
   }
+  if (pat.k === "io" && goal.k === "io") {
+    return ty_unify(pat.t, goal.t, m, qm);
+  }
   if (pat.k === "eql") {
     return false;
   }
@@ -878,9 +910,13 @@ type DefR = {
   qps: string[];
   tps: Array<{ n: string; q: QT }>;
   // a parameter's type may name an earlier parameter (n) of an index type
-  ps: Array<{ q: BQ; t: T; n?: string }>;
+  // (dep: the parameter may be depended on)
+  ps: Array<{ q: BQ; t: T; n?: string; dep?: boolean }>;
   ret: T;
   mask?: Array<number | null>;
+  // wip: the def's own leaves are being drawn; a self-call passes one of
+  // the current sub-fields at the decreasing column (col), each once
+  wip?: { col: number; ps: V[]; subs: V[]; calls: number };
 };
 
 type State = {
@@ -891,6 +927,8 @@ type State = {
   defr: DefR[];
   memo: Map<string, string>;
   wip: Set<string>;
+  // wips: the defs under construction, innermost last
+  wips: DefR[];
   mints: number;
   feat: Record<string, number>;
   // pure : true while generating the interp-visible side — no F32
@@ -959,7 +997,7 @@ class Ctx {
 
 function ctx_new(seed: bigint, uid0: number): Ctx {
   return new Ctx({ uid: uid0, entries: [], adts: [], fams: [], defr: [], memo: new Map(), wip: new Set(),
-    mints: 0, feat: {}, pure: true, trans: false }, new Gen(rng_mix64(seed)));
+    wips: [], mints: 0, feat: {}, pure: true, trans: false }, new Gen(rng_mix64(seed)));
 }
 
 // Size
@@ -986,7 +1024,9 @@ function size_pick(c: Ctx, body: number, cap: number): number {
 // (a + binder — only concretely-Data types); "dead": gone. Dropping a
 // lone binder is fine (the system is affine).
 
-type V = { name: string; ty: T; q: "lone" | "many" | "dead" };
+// dec: a sub-field the self-call may descend on; of: the parameter a
+// variable row re-binds (passed through unchanged, it still counts as it)
+type V = { name: string; ty: T; q: "lone" | "many" | "dead"; dec?: boolean; of?: V };
 
 function v_new(name: string, ty: T, many = false): V {
   return { name, ty, q: many && ty_data(ty) ? "many" : "lone" };
@@ -1005,6 +1045,55 @@ function env_of(env: V[], pred: (t: T) => boolean): V[] {
 
 function env_nums(env: V[]): V[] {
   return env_of(env, (t) => t.k === "u32");
+}
+
+// text_names : the top-level names a source text declares (defs, laws,
+// types and their constructors), with every dotted prefix, since a binder
+// of that name would shadow them
+function text_names(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/^(?:def|law|type)\s+([A-Za-z_][\w.]*)|^\s+([A-Za-z_][\w.]*)\{/gm)) {
+    const parts = (m[1] ?? m[2]).split(".");
+    for (let i = 1; i <= parts.length; i++) {
+      out.push(parts.slice(0, i).join("."));
+    }
+  }
+  return out;
+}
+
+const KEYWORDS = ["def", "type", "law", "match", "case", "do", "return", "for", "exs", "where", "is", "import", "Type", "Data", "Kind", "Quant"];
+const BASE_NAMES = new Set([...KEYWORDS, "_", "main", ...text_names(fs.readFileSync(path.join(ROOT, "bend2", "base.bend"), "utf8"))]);
+// the shape of every name the generator mints at top level (a stem, a uid,
+// a constructor's letter), in any member of a batch
+const MINTED = /^[A-Za-z]+\d+[a-z]?$/;
+const NAME_HEAD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_";
+const NAME_BODY = NAME_HEAD + "0123456789";
+
+// A value binder's name: any name the parser takes as a binder that names
+// nothing else (not `_`, a keyword, a base name, nor of the shape of a
+// minted top-level name, which another member of a batch may hold), or a
+// fifth of the time the name of a binder in scope, which the new one then
+// shadows. `taken` holds the names bound beside it (one line's binders
+// are distinct).
+function bind_name(c: Ctx, env: V[], taken: string[] = []): string {
+  const live = env.filter((v) => v.q !== "dead" && !taken.includes(v.name));
+  if (live.length > 0 && c.g.chance(0.2)) {
+    c.feat("shadow");
+    return c.g.pick(live).name;
+  }
+  for (;;) {
+    const name = c.g.pick(NAME_HEAD.split(""))
+      + Array.from({ length: c.g.decay(0.35) }, () => c.g.pick(NAME_BODY.split(""))).join("");
+    if (!BASE_NAMES.has(name) && !MINTED.test(name) && !taken.includes(name)) {
+      return name;
+    }
+  }
+}
+
+// env_bind : the scope under new binders; a binder in scope with the same
+// name is shadowed, so it is dead there (an erased binder shadows too)
+function env_bind(env: V[], names: string[], vs: V[] = []): V[] {
+  return env.map((v) => names.includes(v.name) ? { ...v, q: "dead" as const } : v).concat(vs);
 }
 
 // bind_keep : a fold bind is consumed once BY the fold; only a + binder
@@ -1145,7 +1234,7 @@ function num_gen_u32(c: Ctx, env: V[], fuel: number): E {
       const op = c.g.pick(["==.", "!=.", "<.", "<=.", ">.", ">=."]);
       return e_fn(helper_bool(c), e_bin(num_gen_f32(c, env, fuel - 1), op, num_gen_f32(c, env, fuel - 1)));
     }],
-    [fuel >= 2 ? 5 : 0, () => tail_call(c, env, fuel)],
+    [fuel >= 2 ? 5 : 0, () => def_new(c, U32C, env, fuel) ?? num_lit_u32(c)],
     [fuel >= 2 ? 4 : 0, () => syn_call_unify(c, U32C, env, fuel) ?? num_lit_u32(c)],
   ])();
 }
@@ -1346,6 +1435,7 @@ function syn_ty0(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[], qvars: strin
   const needData = qt_known(need) === 2;
   return c.g.wpick<() => T>([
     [16, () => U32C],
+    [!needData && fuel > 0 ? 4 : 0, () => ({ k: "arr", el: U32C })],
     [!c.pure ? 8 : 3, () => F32C],
     [8, () => NATC],
     [6, () => BOOLC],
@@ -1560,7 +1650,7 @@ function fam_unfold(f: Fam, arg: string): T | null {
 
 // fam_new : def F(x: I) -> K by match, one arm per constructor of I
 function fam_new(c: Ctx): Fam {
-  const name = "F" + String(c.uid());
+  const name = "Fm" + String(c.uid());
   const ik = c.g.wpick<string>([[5, "nat"], [3, "bool"], [3, "enum"]]);
   c.feat("fam-" + ik);
   let idx: T = ik === "nat" ? NATC : BOOLC;
@@ -1637,7 +1727,7 @@ function disc_fam(c: Ctx, idx: T, at: string): Fam {
   if (got !== undefined) {
     return c.fams.find((f) => f.name === got) as Fam;
   }
-  const name = "F" + String(c.uid());
+  const name = "Fm" + String(c.uid());
   c.memo.set(key, name);
   const arms: FamArm[] = idx.k === "nat"
     ? [{ pat: "0n", sub: null, lit: "0n", ty: at === "0n" ? { k: "empty" } : UNITC },
@@ -1818,7 +1908,7 @@ function adt_field_ty(ft: T, t: Extract<T, { k: "adt" }>, m: Map<string, T>, qm:
 
 // adt_row : one match row for a ctor of an instantiated adt — pattern text
 // plus the bound field vars (erased fields bind but stay dead)
-function adt_row(c: Ctx, t: Extract<T, { k: "adt" }>, ct: Ctor, scrMany: boolean): { pat: string; vs: V[]; plus: V[] } {
+function adt_row(c: Ctx, t: Extract<T, { k: "adt" }>, ct: Ctor, scrMany: boolean, env: V[] = []): { pat: string; vs: V[]; plus: V[]; names: string[] } {
   const m = new Map<string, T>(t.a.tps.map((tp, i) => [tp.n, t.args[i]]));
   const qm = new Map<string, QT>(t.a.qps.map((n, i) => [n, t.qs[i]]));
   const vs: V[] = [];
@@ -1826,7 +1916,7 @@ function adt_row(c: Ctx, t: Extract<T, { k: "adt" }>, ct: Ctor, scrMany: boolean
   const names: string[] = [];
   for (let i = 0; i < ct.fields.length; i++) {
     const f = ct.fields[i];
-    const nm = "m" + String(c.uid());
+    const nm = bind_name(c, env, vs.map((v) => v.name).concat(names));
     const ft = adt_field_ty(f.t, t, m, qm);
     if (f.q === 0) {
       names.push(nm);
@@ -1847,9 +1937,9 @@ function adt_row(c: Ctx, t: Extract<T, { k: "adt" }>, ct: Ctor, scrMany: boolean
   // a List row spells its constructor as the cons or the empty literal
   if (t.a === BASE.List && c.g.chance(0.5)) {
     c.feat("cons-pat");
-    return { pat: ct.name === "Nil" ? "[]" : names[0] + " <> " + names[1], vs, plus };
+    return { pat: ct.name === "Nil" ? "[]" : names[0] + " <> " + names[1], vs, plus, names };
   }
-  return { pat: ct.name + "{" + names.join(", ") + "}", vs, plus };
+  return { pat: ct.name + "{" + names.join(", ") + "}", vs, plus, names };
 }
 
 // Readers
@@ -1971,6 +2061,10 @@ function rd_ensure(c: Ctx, t: T): string {
       case "cmp": return def1("x: Cmp", "(" + helper_cmp(c) + "(x) * " + String(1 + c.g.int(9)) + " : U32)");
       case "char": return def1("x: Char", "(" + helper_chr(c) + "(x) + " + salt() + " : U32)");
       case "str": return def1("x: String", helper_strlen(c) + "(x, " + salt() + ")");
+      case "arr": {
+        c.push("def " + name + "b(r: " + ty_str(t) + " & U32) -> U32:\n  (xa, n) = r\n  (n + " + salt() + " : U32)");
+        return def1("x: " + ty_str(t), name + "b(Array.size(" + ty_grp(t.el) + ", x))");
+      }
       case "unit": return def1("x: Unit", "match x:\n    case Unit{}:\n      " + salt());
       case "tup": {
         return def1("x: " + ty_str(t), "(ta, tb) = x\n  (" + rd_call(c, t.a, "ta") + " + " + rd_call(c, t.b, "tb") + " : U32)");
@@ -2146,97 +2240,6 @@ function tf_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
   return name;
 }
 
-// Tail loops
-// ----------
-// def tl(fuel, a0: U32, ..) -> U32 — countdown state machines: the
-// compiled seq machine's bread and butter (WL_SPIN when fused at a cut).
-// The fuel is the first column, descended structurally, and any chain
-// type serves — an adt whose every constructor holds at most one self
-// field, so the loop walks a line, not a tree: the program's own such
-// adts and base's List (the generic adt path where Nat takes the W64
-// native), plus a Nat (deep peels, case 3n+p, exercise the flattener's
-// Succ chains) or a String walked by character. The fuel
-// value is synthesized like any other, so the loop runs over whatever
-// data the program already builds; only the Nat kind counts down a
-// masked number.
-
-// adt_chain : at most one self field per constructor, and one somewhere
-function adt_chain(a: Adt): boolean {
-  return a.rec && a.ctors.every((ct) => ct.fields.filter((f) => f.t.k === "adt" && f.t.a === a).length <= 1);
-}
-
-function tail_call(c: Ctx, env: V[], fuel: number): E {
-  c.feat("tail");
-  c = c.sub("tail");
-  const name = "tl" + String(c.uid());
-  const naccs = c.g.decay(0.35);
-  const accs = Array.from({ length: naccs }, (_, i) => "a" + String(i));
-  const henv: V[] = accs.map((a2) => v_new(a2, U32C, true));
-  const base = e_at(num_combine(c, accs.map((a2) => e_atom(a2)).concat([num_lit_u32(c)])));
-  const step = (extra: V[]): string => accs.map(() => e_at(num_gen_u32(c, henv.concat(extra).map((v) => ({ ...v })), 1))).join(", ");
-  const chains = c.adts.filter(adt_chain);
-  const kind = c.g.wpick<string>([[4, "nat"], [2, "str"], [2, "list"], [chains.length > 0 ? 4 : 0, "adt"]]);
-  c.feat("tail-" + kind);
-  let fuelP: string;
-  let fuelT: T;
-  let fuelQ: BQ = 1;
-  let arms: string;
-  let fuelArg: string;
-  let mask: number | null = null;
-  if (kind === "nat") {
-    const iters = c.pure ? 2 + c.g.int(size_pick(c, 90, 900)) : size_pick(c, 200 + c.g.int(4000), 200000);
-    const peel = c.g.chance(0.25) ? 2 + c.g.int(3) : 1;
-    if (peel > 1) {
-      c.feat("peel");
-    }
-    fuelP = "+n: Nat";
-    fuelT = NATC;
-    fuelQ = 2;
-    arms = peel === 1
-      ? "  match n:\n    case 0n:\n      " + base + "\n    case 1n+p:\n      " + name + "(p, " + step([]) + ")"
-      : "  match n:\n    case " + String(peel) + "n+p:\n      " + name + "(p, " + step([]) + ")\n    case q:\n      " + base;
-    mask = iters;
-    fuelArg = "U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % " + String(iters) + " : U32))";
-  } else if (kind === "str") {
-    fuelP = "n: String";
-    fuelT = STRC;
-    arms = "  match n:\n    case SNil{}:\n      " + base + "\n    case SCon{h, t}:\n      +hc = " + helper_chr(c) + "(h)\n      "
-      + name + "(t, " + step([v_new("hc", U32C, true)]) + ")";
-    fuelArg = e_at(syn(c, STRC, env, 2));
-  } else {
-    // a chain adt: every constructor with a self field recurses on it,
-    // its other live fields read to U32 for the step; the rest end
-    const a = kind === "list" ? BASE.List : c.g.pick(chains);
-    const t = adt_inst(c, a, false) ?? { k: "adt", a, qs: a.qps.map(() => Q2), args: a.tps.map(() => U32C) } as T;
-    fuelP = "n: " + ty_str(t);
-    fuelT = t;
-    const rows = a.ctors.map((ct) => {
-      const { pat, vs } = adt_row(c, t as Extract<T, { k: "adt" }>, ct, false);
-      const self = vs.find((v) => ty_eq(v.ty, t));
-      if (self === undefined) {
-        return "    case " + pat + ":\n      " + base;
-      }
-      const lets: string[] = [];
-      const heads: V[] = [];
-      for (const v of vs) {
-        if (v !== self && !ty_open(v.ty)) {
-          const h = "h" + String(c.uid());
-          lets.push("      +" + h + " = " + (v.ty.k === "u32" ? v.name : rd_ensure(c, v.ty) + "(" + v.name + ")") + "\n");
-          heads.push(v_new(h, U32C, true));
-        }
-      }
-      return "    case " + pat + ":\n" + lets.join("") + "      " + name + "(" + self.name + ", " + step(heads) + ")";
-    });
-    arms = "  match n:\n" + rows.join("\n");
-    fuelArg = e_at(syn(c, t, env, 2));
-  }
-  c.push("def " + name + "(" + [fuelP].concat(accs.map((a2) => "+" + a2 + ": U32")).join(", ") + ") -> U32:\n" + arms);
-  const ps: Array<{ q: BQ; t: T }> = [{ q: fuelQ, t: fuelT }, ...accs.map((): { q: BQ; t: T } => ({ q: 2, t: U32C }))];
-  c.defr.push({ name, qps: [], tps: [], ps, ret: U32C, mask: [mask, ...accs.map(() => null)] });
-  const args = accs.map(() => e_at(num_gen_u32(c, env, Math.min(fuel - 1, 1))));
-  return e_call(name, name + "(" + [fuelArg].concat(args).join(", ") + ")");
-}
-
 // Syn: values
 // -----------
 // syn(c, goal, env, fuel): produce a term of type goal. Productions per goal
@@ -2272,6 +2275,10 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         [fuel > 0 ? 5 : 0, () => e_bin(syn(c, BOOLC, env, fuel - 1), c.g.pick(["&&", "||"]), syn(c, BOOLC, env, fuel - 1))],
         [fuel > 0 ? 4 : 0, () => e_fn("Bool.not", syn(c, BOOLC, env, fuel - 1))],
         [fuel > 0 ? 4 : 0, () => e_fn("Nat.is_lt", num_gen_nat(c, env, fuel - 1), num_gen_nat(c, env, fuel - 1))],
+        [fuel > 0 ? 4 : 0, () => {
+          c.feat("string-eq");
+          return e_fn("String.eq", syn(c, STRC, env, fuel - 1), syn(c, STRC, env, fuel - 1));
+        }],
         [fuel > 0 && !c.pure ? 5 : 0, () => e_bin(num_gen_f32(c, env, fuel - 1), c.g.pick(["==.", "!=.", "<.", "<=.", ">.", ">=."]), num_gen_f32(c, env, fuel - 1))],
       ])();
     }
@@ -2307,6 +2314,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
           c.feat("f32-show");
           return e_fn("F32.show", num_gen_f32(c, env, fuel - 1));
         }],
+        [fuel >= 2 ? 4 : 0, () => def_new(c, goal, env, fuel - 1) ?? e_atom(str_lit(c, 3))],
       ])();
     }
     case "tvar": {
@@ -2339,10 +2347,18 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
     }
     case "tup": {
       const intro = (): E => e_atom("(" + e_at(syn(c, goal.a, env, Math.max(0, fuel - 1))) + ", " + e_at(syn(c, goal.b, env, Math.max(0, fuel - 1))) + ")");
+      // an array read or measured: the array comes back beside the word
+      const arrs = goal.a.k === "arr" && goal.b.k === "u32" && goal.q === 1 ? env.filter((v) => v.q !== "dead" && ty_eq(v.ty, goal.a)) : [];
       return c.g.wpick<() => E>([
         [var_w, pick_var],
         [30, intro],
         [8, () => uni() ?? intro()],
+        [arrs.length > 0 ? 40 : 0, () => {
+          c.feat("array-ops");
+          const a = e_atom(env_take(c.g.pick(arrs)));
+          return c.g.chance(0.7) ? e_fn("Array.get", e_atom("U32"), a, num_gen_u32(c, env, 0)) : e_fn("Array.size", e_atom("U32"), a);
+        }],
+        [fuel >= 2 ? 5 : 0, () => def_new(c, goal, env, fuel - 1) ?? intro()],
       ])();
     }
     case "map": {
@@ -2373,14 +2389,14 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         return e_atom(b + " => Empty.absurd(" + ty_str(goal.cod) + ", " + refute_ensure(c, goal.dom as Extract<T, { k: "eql" }>) + "(" + b + "))");
       }
       const lam = (): E => {
-        const b = "y" + String(c.uid());
+        const b = bind_name(c, env);
         if (goal.q === 0) {
           // erased domain: the binder is dead inside
-          const body = e_at(syn(c, goal.cod, env, Math.min(Math.max(0, fuel - 1), 2)));
+          const body = e_at(syn(c, goal.cod, env_bind(env, [b]), Math.min(Math.max(0, fuel - 1), 2)));
           return e_atom(b + " => " + body);
         }
         const bv = v_new(b, goal.dom, goal.q === 2);
-        return e_atom(b + " => " + e_at(syn(c, goal.cod, env.concat([bv]), Math.min(fuel, 1))));
+        return e_atom(b + " => " + e_at(syn(c, goal.cod, env_bind(env, [b], [bv]), Math.min(fuel, 1))));
       };
       return c.g.wpick<() => E>([
         [var_w, pick_var],
@@ -2389,7 +2405,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         // argument (deeper partials die in js_book)
         [fuel >= 1 && goal.q === 1 ? 15 : 0, () => {
           const cands = c.defr.filter((d) =>
-            d.qps.length === 0 && d.tps.length === 0 && d.ps.length >= 1
+            d.wip === undefined && d.qps.length === 0 && d.tps.length === 0 && d.ps.length >= 1
             && ty_eq(d.ps[d.ps.length - 1].t, goal.dom) && ty_eq(d.ret, goal.cod)
             && d.ps[d.ps.length - 1].q === 1
             && (d.mask?.[d.ps.length - 1] ?? null) === null);
@@ -2449,7 +2465,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         [is_list && fuel > 0 && !ty_open(goal) && goal.qs[0].k === "q" && goal.qs[0].q === 1 ? 6 : 0, () => {
           c.feat("list-map");
           const src = c.g.pick([U32C, BOOLC, NATC]);
-          const y = "y" + String(c.uid());
+          const y = bind_name(c, env);
           const body = e_at(syn(c, goal.args[0], [v_new(y, src)], Math.max(0, fuel - 1)));
           return e_atom("List.map(~" + ty_grp(src) + ", ~" + ty_grp(goal.args[0]) + ", ~(" + y + " => " + body + "), " + e_at(syn(c, t_list(Q1, src), env, fuel - 1)) + ")");
         }],
@@ -2458,12 +2474,36 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
           return e_atom(tf_ensure(c, goal as Extract<T, { k: "adt" }>) + "(" + e_at(syn(c, goal, env, Math.max(0, fuel - 1))) + ")");
         }],
         [8, () => uni() ?? intro()],
+        [!ty_open(goal) && fuel >= 2 ? 5 : 0, () => def_new(c, goal, env, fuel - 1) ?? intro()],
       ])();
     }
     case "arr": {
-      // arrays are linear and live in the array kit; a bare goal builds one
-      const d = 1 + c.g.int(3);
-      return e_fn("Array.new", e_atom(ty_grp(goal.el)), e_atom(String(d) + "n"), syn(c, goal.el, env, 0));
+      // arrays are linear: a fresh one, or one in scope written at an index
+      const arrs = env.filter((v) => v.q !== "dead" && ty_eq(v.ty, goal));
+      const fresh = (): E => {
+        c.feat("array-ops");
+        const d = 1 + c.g.int(3);
+        return c.g.chance(0.5)
+          ? e_fn("Array.new", e_atom(ty_grp(goal.el)), e_atom(String(d) + "n"), syn(c, goal.el, env, 0))
+          : e_atom("[" + e_at(syn(c, goal.el, env, 0)) + " : " + ty_grp(goal.el) + "^" + String(d) + "n]");
+      };
+      return c.g.wpick<() => E>([
+        [var_w, pick_var],
+        [30, fresh],
+        [arrs.length > 0 && fuel > 0 ? 30 : 0, () => {
+          c.feat("array-write");
+          return e_fn("Array.set", e_atom(ty_grp(goal.el)), e_atom(env_take(c.g.pick(arrs))), num_gen_u32(c, env, 0), syn(c, goal.el, env, Math.max(0, fuel - 1)));
+        }],
+      ])();
+    }
+    case "io": {
+      const pure = (): E => e_atom("IO.pure(" + ty_grp(goal.t) + ", " + e_at(syn(c, goal.t, env, Math.max(0, fuel - 1))) + ")");
+      return c.g.wpick<() => E>([
+        [var_w, pick_var],
+        [25, pure],
+        [fuel >= 1 ? 30 : 0, () => uni() ?? pure()],
+        [fuel >= 2 ? 8 : 0, () => def_new(c, goal, env, fuel - 1) ?? pure()],
+      ])();
     }
     case "app": {
       // a closed index unfolds to its arm; any index goes through the
@@ -2509,9 +2549,40 @@ function syn_def_arg(c: Ctx, d: DefR, i: number, t: T, env: V[], fuel: number): 
 function syn_def_args(c: Ctx, d: DefR, env: V[], fuel: number): string[] | null {
   const args: string[] = [];
   let ps = d.ps.slice();
+  if (d.wip !== undefined && c.s.wips[c.s.wips.length - 1]?.name !== d.name) {
+    return null;
+  }
+  const subs = d.wip === undefined ? null : d.wip.subs.filter((v) => v.q !== "dead" && env.includes(v));
+  if (subs !== null && subs.length === 0) {
+    return null;
+  }
   for (let i = 0; i < ps.length; i++) {
     const p = ps[i];
-    const deps = p.n === undefined ? [] : ps.slice(i + 1).filter((q) => ty_str(q.t).includes(p.n as string));
+    if (subs !== null && i < (d.wip as { col: number }).col) {
+      // the checker takes the first changed live argument as the one
+      // that must shrink: an earlier one is the parameter itself (or the
+      // variable that re-bound it), or there is no self-call here
+      const pn = d.ps[i].n as string;
+      if (p.q === 0) {
+        args.push(pn);
+        continue;
+      }
+      const own = (d.wip as { ps: V[] }).ps[i];
+      const same = env.find((v) => v.q !== "dead" && (v === own || v.of === own));
+      if (same === undefined) {
+        return null;
+      }
+      args.push(env_take(same));
+      continue;
+    }
+    if (subs !== null && i === d.wip?.col) {
+      const sub = c.g.pick(subs);
+      d.wip.subs = d.wip.subs.filter((v) => v !== sub);
+      d.wip.calls++;
+      args.push(env_take(sub));
+      continue;
+    }
+    const deps = p.n === undefined || p.dep === false ? [] : ps.slice(i + 1).filter((q) => new RegExp("\\b" + (p.n as string) + "\\b").test(ty_str(q.t)));
     if (deps.length > 0 && idx_type(p.t)) {
       const ok = idx_lits(p.t).filter((w) => deps.every((q) => ty_inh(ty_tsub(q.t, p.n as string, w))));
       if (ok.length === 0) {
@@ -2562,7 +2633,7 @@ function syn_call_unify(c: Ctx, goal: T, env: V[], fuel: number): E | null {
     }
   }
   // a + parameter must instantiate at a concretely-Data type
-  const ps = d.ps.map((p) => ({ q: p.q, t: ty_sub(p.t, m, qm) }));
+  const ps = d.ps.map((p) => ({ ...p, t: ty_sub(p.t, m, qm) }));
   if (ps.some((p) => (p.q === 2 && !ty_data(p.t)) || ty_open(p.t))) {
     return null;
   }
@@ -2580,95 +2651,379 @@ function syn_call_unify(c: Ctx, goal: T, env: V[], fuel: number): E | null {
   return e_call(d.name, d.name + "(" + qargs.concat(targs, args).join(", ") + ")");
 }
 
-// Minted defs
-// -----------
-// syn_mint_def : a fresh def returning the goal, with -/plain/+ parameter
-// sigils drawn per position; occasionally split as assert + fill, and
-// rarely @unsafe (skips descent — still terminating by construction).
+// Defs
+// ----
+// One production mints every def with control flow. def_new(c, goal, env,
+// fuel) draws the parameters, matches on some of them at the head of the
+// body (a decision tree over their constructors, a variable row where an
+// arm does not care, a nested match on a row's last binder) and
+// synthesizes each leaf against the goal with the row's binders in scope.
+// The def sits in the registry while its leaves are drawn, callable only
+// with a sub-field bound by a constructor pattern at its decreasing column
+// (a variable row binds the whole value, which does not shrink), each such
+// sub-field once per leaf. So a countdown loop, a fold, a tree recursion,
+// a state record rebuilt each step, a tuple-returning walk and an IO loop
+// are one production at different goals and parameter types; a monadic
+// goal (IO, Maybe, Result) may take a do-block leaf. Loop-flavoured defs
+// end every recursive leaf in a tail self-call and run long.
 
-function syn_mint_def(c: Ctx, goal: T, env: V[]): E | null {
-  if (goal.k === "eql" || goal.k === "arr" || ty_open(goal) || c.mints >= 10) {
+type Split = { pat: string; vs: V[]; subs: V[]; wild: boolean };
+type DefSt = { loop: boolean; dec: V | null; fuel: number; leaves: number; cap: number };
+
+function col_matchable(t: T): boolean {
+  switch (t.k) {
+    case "nat": case "bool": case "cmp": case "unit": case "char": case "str": case "tup": return true;
+    case "adt": return t.a.ctors.length > 0 && !ty_open(t);
+    default: return false;
+  }
+}
+
+// col_wild : a variable row over one column, the whole value re-bound
+function col_wild(c: Ctx, v: V, env: V[], taken: string[] = []): Split {
+  const n = bind_name(c, env, taken);
+  return { pat: n, vs: [{ ...v_new(n, v.ty, v.q === "many"), of: v.of ?? v }], subs: [], wild: true };
+}
+
+// col_splits : the constructor rows one column splits into; a Nat may
+// peel or table with a variable row last, a List<U32> may take literal
+// patterns, a datatype's rows come from adt_row
+function col_splits(c: Ctx, v: V, env: V[], desc: boolean, bound: string[]): Split[] {
+  const t = v.ty;
+  const many = v.q === "many";
+  const fresh = (desc ? env.map((w) => w.name) : []).concat(bound);
+  const senv = env.filter((w) => !bound.includes(w.name));
+  const bind = (taken: string[], ty: T): V => v_new(bind_name(c, senv, taken.concat(fresh)), ty, many);
+  const row = (pat: (vs: V[]) => string, vs: V[], subs: V[] = []): Split => ({ pat: pat(vs), vs, subs, wild: false });
+  switch (t.k) {
+    case "nat": {
+      const style = c.g.wpick<string>([[6, "succ"], [2, "peel"], [2, "table"]]);
+      c.feat("match-nat");
+      if (style === "succ") {
+        const p = bind([], NATC);
+        return [row(() => "0n", []), row((vs) => "1n+" + vs[0].name, [p], [p])];
+      }
+      if (style === "peel") {
+        c.feat("peel");
+        const p = bind([], NATC);
+        return [row((vs) => String(2 + c.g.int(4)) + "n+" + vs[0].name, [p], [p]), col_wild(c, v, senv, fresh)];
+      }
+      c.feat("nat-table");
+      const n = 2 + c.g.int(size_pick(c, 4, 40));
+      return Array.from({ length: n }, (_, i) => row(() => String(i) + "n", [])).concat([col_wild(c, v, senv, fresh)]);
+    }
+    case "bool":
+      c.feat("match-bool");
+      return [row(() => "False{}", []), row(() => "True{}", [])];
+    case "cmp":
+      c.feat("match-cmp");
+      return ["LT{}", "EQ{}", "GT{}"].map((p) => row(() => p, []));
+    case "unit":
+      return [row(() => "Unit{}", [])];
+    case "char": {
+      c.feat("match-char");
+      const k = bind([], U32C);
+      return [row((vs) => "Chr{" + vs[0].name + "}", [k])];
+    }
+    case "str": {
+      c.feat("match-str");
+      const h = bind([], CHARC);
+      const tl = bind([h.name], STRC);
+      return [row(() => "SNil{}", []), row((vs) => "SCon{" + vs[0].name + ", " + vs[1].name + "}", [h, tl], [tl])];
+    }
+    case "tup": {
+      c.feat("match-tup");
+      const a = bind([], t.a);
+      const b = bind([a.name], t.b);
+      return [row((vs) => "(" + vs[0].name + ", " + vs[1].name + ")", [a, b])];
+    }
+    case "adt": {
+      c.feat("match-adt");
+      if (t.a === BASE.List && t.args[0].k === "u32" && t.qs[0].k === "q" && t.qs[0].q === 2 && c.g.chance(0.3)) {
+        c.feat("list-pat");
+        const u = bind([], U32C);
+        const w = bind([u.name], U32C);
+        u.q = "many";
+        return [row((vs) => "[+" + vs[0].name + ", " + vs[1].name + "]", [u, w]), row(() => "[]", []), { pat: "_", vs: [], subs: [], wild: true }];
+      }
+      return t.a.ctors.map((ct) => {
+        const r = adt_row(c, t, ct, many, desc ? [] : senv);
+        const erased = r.names.map((nm) => nm.replace(/^\+/, "")).filter((nm) => !r.vs.some((w) => w.name === nm))
+          .map((nm): V => ({ name: nm, ty: U32C, q: "dead" }));
+        return { pat: r.pat, vs: r.vs.concat(erased), subs: r.vs.filter((f) => ty_eq(f.ty, t)), wild: false };
+      });
+    }
+    default:
+      return [col_wild(c, v, senv, fresh)];
+  }
+}
+
+// match_text : a match over columns (parameters, or one bound field), its
+// rows the decision tree over their splits, each leaf drawn under the
+// row's binders with the sub-fields the self-call may descend on
+function match_text(c: Ctx, d: DefR, goal: T, cols: V[], env: V[], subs: V[], ind: string, depth: number, st: DefSt): string {
+  const rows: string[] = [];
+  const bound: V[] = [];
+  const go = (i: number, pats: string[], env2: V[], subs2: V[], last: V | null): void => {
+    if (i === cols.length) {
+      rows.push(ind + "  case " + pats.join(", ") + ":\n" + leaf_text(c, d, goal, env2, subs2, last, ind + "    ", depth, st));
+      return;
+    }
+    void last;
+    const col = cols[i];
+    const wild = !col_matchable(col.ty) || st.leaves + rows.length > st.cap || (cols.length > 1 && c.g.chance(0.25));
+    if (wild && col_matchable(col.ty)) {
+      c.feat("wild");
+    }
+    // a sub-field descends when its column is the decreasing one, or a
+    // binder that descends (a nested match on it)
+    const desc = col.dec === true || col === st.dec;
+    const row = pats.length === 0 ? [] : env2.filter((w) => w.of !== undefined || bound.includes(w)).map((w) => w.name);
+    const splits = wild ? [col_wild(c, col, env2, row)] : col_splits(c, col, env2, desc, row);
+    for (const s of splits) {
+      if (desc) {
+        s.subs.forEach((w) => { w.dec = true; });
+      }
+      const env3 = env_bind(env2, s.vs.map((w) => w.name), s.vs);
+      bound.push(...s.vs);
+      // a nested match may scrutinize the last column's last binder only
+      const lastHere = i === cols.length - 1 && !s.wild ? (s.vs.length > 0 ? s.vs[s.vs.length - 1] : null) : null;
+      go(i + 1, pats.concat([s.pat]), env3, desc ? subs2.concat(s.subs) : subs2, lastHere);
+    }
+  };
+  if (cols.length > 1) {
+    c.feat("match-multi");
+  }
+  for (const v of cols) {
+    if (v.q === "lone") {
+      v.q = "dead";
+    }
+  }
+  go(0, [], env.filter((v) => v.q !== "dead"), subs.filter((v) => v.q !== "dead"), null);
+  return ind + "match " + cols.map((v) => v.name).join(", ") + ":\n" + rows.join("\n");
+}
+
+// leaf_text : a row's body: maybe a nested match on the row's last binder,
+// else lines — a lone Data binder copied reusable (+x2 = x), two
+// self-calls in a parallel let — and the final value: a tail self-call in
+// a loop, a do-block at a monadic goal, or any term of the goal
+function leaf_text(c: Ctx, d: DefR, goal: T, env: V[], subs: V[], last: V | null, ind: string, depth: number, st: DefSt): string {
+  st.leaves++;
+  if (last !== null && last.q === "lone" && depth < 2 && col_matchable(last.ty) && c.g.chance(0.3)) {
+    c.feat("match-nest");
+    return match_text(c, d, goal, [last], env, subs, ind, depth + 1, st);
+  }
+  const wip = d.wip as { col: number; ps: V[]; subs: V[]; calls: number };
+  const lines: string[] = [];
+  for (const v of env.filter((w) => w.q === "lone" && w.of === undefined && ty_data(w.ty))) {
+    if (env.includes(v) && c.g.chance(0.12)) {
+      c.feat("plus-rebind");
+      const n = bind_name(c, env);
+      lines.push("+" + n + " = " + env_take(v));
+      env = env_bind(env, [n], [v_new(n, v.ty, true)]);
+    }
+  }
+  wip.subs = subs.filter((v) => v.q !== "dead");
+  // self-call : the decreasing argument drawn here, the others under an
+  // empty sub list (no self-call nests inside an argument)
+  const self_call = (fuel: number): string | null => {
+    const cands = wip.subs.filter((v) => v.q !== "dead");
+    if (cands.length === 0) {
+      return null;
+    }
+    const s = c.g.pick(cands);
+    const saved = wip.subs.filter((v) => v !== s);
+    wip.subs = [s];
+    const args = syn_def_args(c, d, env, fuel);
+    wip.subs = saved;
+    return args === null ? null : d.name + "(" + args.join(", ") + ")";
+  };
+  if (goal.k !== "io" && wip.subs.length >= 2 && c.g.chance(0.3)) {
+    const a = self_call(1);
+    const b = self_call(1);
+    if (a !== null && b !== null) {
+      c.feat("fork");
+      const plus = ty_data(goal) && c.g.chance(0.3);
+      const x = bind_name(c, env);
+      const y = bind_name(c, env, [x]);
+      lines.push((plus ? "+" : "") + x + " " + (plus ? "+" : "") + y + " = " + a.replace("(", gpu_mark(c) + "(") + " " + b.replace("(", gpu_mark(c) + "("));
+      env = env_bind(env, [x, y], [v_new(x, goal, plus), v_new(y, goal, plus)]);
+    }
+  }
+  let fin: string | null = null;
+  if (st.loop && wip.subs.some((v) => v.q !== "dead")) {
+    fin = self_call(1);
+  }
+  if (fin === null && (goal.k === "io" || (goal.k === "adt" && (goal.a === BASE.Maybe || goal.a === BASE.Result))) && (goal.k === "io" || c.g.chance(0.5))) {
+    fin = do_text(c, goal, env, ind, st.fuel);
+  }
+  if (fin === null) {
+    fin = e_at(syn(c, goal, env, st.fuel));
+  }
+  return lines.concat([fin]).map((l, i) => (i === 0 ? ind : "\n" + ind) + l).join("");
+}
+
+// do_text : a do-block at a monadic goal — binds drawn as values of the
+// monad at a small element type (the def itself among them at IO, so an
+// IO walk recurses from inside its block), a do let, and the final action
+function do_text(c: Ctx, goal: T, env: V[], ind: string, fuel: number): string {
+  const io = goal.k === "io";
+  const inner = io ? (goal as Extract<T, { k: "io" }>).t : (goal as Extract<T, { k: "adt" }>).args[(goal as Extract<T, { k: "adt" }>).args.length - 1];
+  const g = goal as Extract<T, { k: "adt" }>;
+  const head = io ? "do IO<" + ty_str(inner) + ">:" : "do " + g.a.name + "<" + g.qs.map(qt_str).concat(g.args.map(ty_grp)).join(", ") + ">:";
+  c.feat(io ? "do-io" : (goal as Extract<T, { k: "adt" }>).a === BASE.Maybe ? "do-maybe" : "do-result");
+  const lines: string[] = [];
+  const n = c.g.int(3);
+  for (let i = 0; i < n; i++) {
+    const el = c.g.pick([U32C, U32C, BOOLC, UNITC]);
+    const act: T = io ? { k: "io", t: el } : { ...(goal as Extract<T, { k: "adt" }>), args: (goal as Extract<T, { k: "adt" }>).args.slice(0, -1).concat([el]) };
+    const plus = ty_data(el) && c.g.chance(0.3);
+    if (plus) {
+      c.feat("plus-do");
+    }
+    const x = bind_name(c, env);
+    lines.push((plus ? "+" : "") + x + " : " + ty_str(el) + " <- " + e_at(syn(c, act, env, Math.max(0, fuel - 1))));
+    env = env_bind(env, [x], [v_new(x, el, plus)]);
+  }
+  if (c.g.chance(0.3)) {
+    c.feat("do-let");
+    const z = bind_name(c, env);
+    lines.push("+" + z + " : U32 = " + e_at(num_gen_u32(c, env, 1)));
+    env = env_bind(env, [z], [v_new(z, U32C, true)]);
+  }
+  const fin = io ? e_at(syn(c, goal, env, fuel)) : "return " + e_at(syn(c, inner, env, fuel));
+  return head + lines.concat([fin]).map((l) => "\n" + ind + "  " + l).join("");
+}
+
+function def_new(c: Ctx, goal: T, env: V[], fuel: number): E | null {
+  if (goal.k === "eql" || ty_open(goal) || c.mints >= 12) {
     return null;
   }
   c.mints++;
-  c.feat("mint");
-  c = c.sub("mint");
+  c.feat("def");
+  c = c.sub("def");
   const name = "fn" + String(c.uid());
-  const nps = 1 + c.g.int(3);
-  const ps: Array<{ q: BQ; t: T; n?: string }> = [];
+  const nps = Math.min(10, c.g.decay(0.55));
+  const ps: Array<{ q: BQ; t: T; n: string; dep?: boolean }> = [];
+  const names: string[] = [];
   for (let i = 0; i < nps; i++) {
+    const pn = bind_name(c, [], names);
+    names.push(pn);
     // evidence about an earlier index parameter: a family at it (the def
     // is then callable at the indices whose arm has a value)
-    const idxps = ps.filter((p) => p.n !== undefined && p.q === 2 && idx_type(p.t));
+    const idxps = ps.filter((p) => p.dep === true);
     const fams = idxps.length > 0 ? c.fams.filter((f) => f.done && idxps.some((p) => ty_eq(p.t, f.idx))) : [];
     if (fams.length > 0 && c.g.chance(0.35)) {
       c.feat("dep-param");
       const f = c.g.pick(fams);
       const on = c.g.pick(idxps.filter((p) => ty_eq(p.t, f.idx)));
-      ps.push({ q: 1, t: { k: "app", f, arg: on.n as string }, n: "p" + String(i) });
+      ps.push({ q: 1, t: { k: "app", f, arg: on.n }, n: pn, dep: false });
       continue;
     }
-    const t = syn_ty(c, 1, Q0, [], []);
+    // a parameter of the goal's own type: the state a loop rebuilds
+    const state = i === 0 && (goal.k === "adt" || goal.k === "tup" || goal.k === "str" || goal.k === "arr") && c.g.chance(0.35);
+    if (state) {
+      c.feat("state");
+    }
+    const t = state ? goal : syn_ty(c, 1, Q0, [], []);
     const q: BQ = c.g.wpick<BQ>([[7, 1], [2, 0], [ty_data(t) ? 3 : 0, 2]]);
-    // an index parameter re-binds reusable, so evidence about it may follow
-    ps.push({ q: idx_type(t) && q !== 0 ? 2 : q, t, n: "p" + String(i) });
+    ps.push({ q: idx_type(t) && q !== 0 ? 2 : q, t, n: pn, dep: idx_type(t) && q !== 0 });
   }
   if (ps.some((p) => p.q === 0)) {
     c.feat("erased-param");
   }
-  const penv = ps.map((p, i) => {
-    const v = v_new("p" + String(i), p.t, p.q === 2);
+  const penv = ps.map((p) => {
+    const v = v_new(p.n, p.t, p.q === 2);
     if (p.q === 0) {
       v.q = "dead";
     }
     return v;
-  }).filter((v) => v.q !== "dead");
-  let body: E;
+  });
+  // the scrutinees: live matchable parameters, in order, at most three
+  const depended = new Set(ps.filter((p) => p.t.k === "app").map((p) => (p.t as Extract<T, { k: "app" }>).arg));
+  const cols = penv.filter((v) => v.q !== "dead" && !depended.has(v.name) && col_matchable(v.ty) && c.g.chance(0.6)).slice(0, 3);
+  const descends = (t: T): boolean => t.k === "nat" || t.k === "str" || (t.k === "adt" && t.a.rec);
+  const decs = cols.filter((v) => descends(v.ty));
+  const dec = decs.length > 0 && c.g.chance(0.85) ? c.g.pick(decs) : null;
+  const col = dec === null ? -1 : penv.indexOf(dec);
+  const loop = dec !== null && c.g.chance(0.4);
+  const mask: Array<number | null> = ps.map((p, i) => i === col && p.t.k === "nat"
+    ? (loop ? (c.pure ? 2 + c.g.int(size_pick(c, 90, 900)) : size_pick(c, 200 + c.g.int(4000), 200000)) : 4 + c.g.int(8))
+    : null);
+  const d: DefR = { name, qps: [], tps: [], ps, ret: goal, mask, wip: { col, ps: penv, subs: [], calls: 0 } };
+  c.defr.push(d);
+  c.s.wips.push(d);
+  const st: DefSt = { loop, dec, fuel: 2, leaves: 0, cap: 24 };
+  let body: string;
   try {
-    body = syn(c, goal, penv, 2);
+    body = cols.length > 0
+      ? match_text(c, d, goal, cols, penv.filter((v) => v.q !== "dead"), [], "  ", 0, st)
+      : leaf_text(c, d, goal, penv.filter((v) => v.q !== "dead"), [], null, "  ", 0, st);
   } catch {
+    c.defr.splice(c.defr.indexOf(d), 1);
+    c.s.wips.pop();
     c.mints--;
     return null;
   }
-  const params = ps.map((p, i) => bq_prefix(p.q) + "p" + String(i) + ": " + ty_top(p.t));
-  const split = c.g.chance(0.2);
-  if (split) {
+  c.s.wips.pop();
+  const calls = (d.wip as { calls: number }).calls;
+  delete d.wip;
+  if (calls > 0) {
+    c.feat("rec");
+    c.feat("rec-" + (dec as V).ty.k);
+    if (loop) {
+      c.feat("loop");
+    }
+  }
+  if (goal.k === "io") {
+    c.feat("io-def");
+    if (calls > 0) {
+      c.feat("rec-io");
+    }
+  }
+  if (goal.k === "tup") {
+    c.feat("ret-tup");
+  }
+  if (ps.some((p) => p.t.k === "arr")) {
+    c.feat("arr-param");
+  }
+  const params = ps.map((p) => bq_prefix(p.q) + p.n + ": " + ty_top(p.t));
+  if (c.g.chance(0.15)) {
     c.feat("assert-def");
     // a law telescope: a pair parameter over an index may read as `for x: A
     // where B`, the def then opening the pair; a pair result as `exs`
-    // a `where` row names the pair's witness; the def's parameter is the
-    // pair itself, as base's own where-laws take it
     const rows: string[] = [];
-    ps.forEach((p, i) => {
-      const pn = "p" + String(i);
+    for (const p of ps) {
       if (p.t.k === "sig" && p.q === 1 && idx_type(p.t.a) && c.g.chance(0.6)) {
         c.feat("law-where");
-        rows.push("  for " + pn + ": " + ty_top(p.t.a) + " where " + ty_str(ty_tsub(p.t.b, p.t.x, pn)));
-        return;
+        rows.push("  for " + p.n + ": " + ty_top(p.t.a) + " where " + ty_str(ty_tsub(p.t.b, p.t.x, p.n)));
+        continue;
       }
-      rows.push("  for " + bq_prefix(p.q) + pn + ": " + ty_top(p.t));
-    });
+      rows.push("  for " + bq_prefix(p.q) + p.n + ": " + ty_top(p.t));
+    }
     let claim = ty_top(goal);
     if (goal.k === "sig" && c.g.chance(0.6)) {
       c.feat("law-exs");
       rows.push("  exs " + goal.x + ": " + ty_top(goal.a));
       claim = ty_top(goal.b);
     }
-    c.push("law " + name + ":\n" + rows.join("\n") + "\n  " + claim + "\n\ndef " + name + "(" + ps.map((_, i) => "p" + String(i)).join(", ") + "):\n  " + e_at(body));
+    c.push("law " + name + ":\n" + rows.join("\n") + "\n  " + claim + "\n\ndef " + name + "(" + ps.map((p) => p.n).join(", ") + "):\n" + body);
   } else {
-    const unsafe = c.g.chance(0.06);
+    const unsafe = c.g.chance(0.04);
     if (unsafe) {
       c.feat("unsafe");
     }
-    c.push((unsafe ? "@unsafe\n" : "") + "def " + name + "(" + params.join(", ") + ") -> " + ty_str(goal) + ":\n  " + e_at(body));
+    c.push((unsafe ? "@unsafe\n" : "") + "def " + name + "(" + params.join(", ") + ") -> " + ty_str(goal) + ":\n" + body);
   }
-  const d: DefR = { name, qps: [], tps: [], ps, ret: goal };
-  c.defr.push(d);
-  const args = syn_def_args(c, d, env, 1);
+  const args = syn_def_args(c, d, env, Math.min(fuel, 1));
   if (args === null) {
     return null;
   }
   return e_call(name, name + "(" + args.join(", ") + ")");
+}
+
+// def_call : a minted def's call as a statement value, or a registry call
+function def_call(c: Ctx, goal: T, env: V[], fuel: number): E | null {
+  return def_new(c, goal, env, fuel) ?? syn_call_unify(c, goal, env, fuel);
 }
 
 // generic_mint : a quantity- and type-polymorphic def. The tvar-typed
@@ -2721,222 +3076,6 @@ function generic_mint(c: Ctx): void {
   c.defr.push({ name, qps: qps.slice(0, nq), tps, ps: [{ q: 1, t: et }], ret: rt });
 }
 
-// Match trees
-// -----------
-// Minted defs whose bodies are matches over their own parameters — the
-// only lawful scrutinees. Nat switches (constant tables, deep peels),
-// Bool/Cmp products, adt folds with nested field matches.
-
-function match_nat_def(c: Ctx, env: V[], fuel: number): E {
-  c.feat("match-nat");
-  c = c.sub("match");
-  const name = "mt" + String(c.uid());
-  const style = c.g.wpick<string>([[4, "table"], [3, "peel"], [3, "nest"]]);
-  let body: string;
-  if (style === "table") {
-    // 3+ constant word entries: the CONSTV/TAB_AT special
-    c.feat("nat-table");
-    const n = 3 + c.g.int(size_pick(c, 4, 40));
-    const rows: string[] = [];
-    for (let i = 0; i < n; i++) {
-      rows.push("    case " + String(i) + "n:\n      " + String(c.g.int(100000)));
-    }
-    rows.push("    case k:\n      " + String(c.g.int(1000)));
-    body = "  match n:\n" + rows.join("\n");
-  } else if (style === "peel") {
-    const k = 2 + c.g.int(4);
-    c.feat("peel");
-    body = "  match n:\n    case " + String(k) + "n+p:\n      (U32.from_nat(p) + " + String(c.g.int(64)) + " : U32)"
-      + "\n    case q:\n      (U32.from_nat(q) * " + String(2 + c.g.int(9)) + " : U32)";
-  } else {
-    c.feat("match-nest");
-    body = "  match n:\n    case 0n:\n      " + String(c.g.int(64))
-      + "\n    case 1n+p:\n      match p:\n        case 0n:\n          " + String(c.g.int(64))
-      + "\n        case 1n+q:\n          (U32.from_nat(q) + " + String(c.g.int(64)) + " : U32)";
-  }
-  c.push("def " + name + "(n: Nat) -> U32:\n" + body);
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 1, t: NATC }], ret: U32C, mask: [64] });
-  return e_call(name, name + "(U32.to_nat((" + e_at(num_gen_u32(c, env, Math.min(fuel, 1))) + " % 64 : U32)))");
-}
-
-function match_bool_def(c: Ctx, env: V[], fuel: number): E {
-  c.feat("match-bool");
-  c = c.sub("match");
-  const name = "mb" + String(c.uid());
-  const two = c.g.chance(0.4);
-  let body: string;
-  if (two) {
-    c.feat("match-multi");
-    const arm = (): string => e_at(num_gen_u32(c, [], 1));
-    body = "  match a b:\n    case False{} False{}:\n      " + arm()
-      + "\n    case False{} True{}:\n      " + arm()
-      + "\n    case True{} False{}:\n      " + arm()
-      + "\n    case True{} True{}:\n      " + arm();
-    c.push("def " + name + "(a: Bool, b: Bool) -> U32:\n" + body);
-    c.defr.push({ name, qps: [], tps: [], ps: [{ q: 1, t: BOOLC }, { q: 1, t: BOOLC }], ret: U32C });
-    return e_call(name, name + "(" + e_at(syn(c, BOOLC, env, fuel)) + ", " + e_at(syn(c, BOOLC, env, fuel)) + ")");
-  }
-  // the branchless OR-mask special: two constant equality tests on one var
-  c.feat("bool-ormask");
-  const k1 = String(c.g.int(64));
-  const k2 = String(c.g.int(64));
-  body = "  match b:\n    case False{}:\n      " + helper_bool(c) + "(U32.is_eq(x, " + k1 + "))"
-    + "\n    case True{}:\n      " + helper_bool(c) + "(U32.is_eq(x, " + k2 + "))";
-  c.push("def " + name + "(b: Bool, +x: U32) -> U32:\n" + body);
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 1, t: BOOLC }, { q: 2, t: U32C }], ret: U32C });
-  return e_call(name, name + "(" + e_at(syn(c, BOOLC, env, fuel)) + ", " + e_at(num_gen_u32(c, env, 1)) + ")");
-}
-
-function match_adt_def(c: Ctx, env: V[], fuel: number): E | null {
-  const closed = c.adts.filter((a) => a.ctors.length > 0);
-  if (closed.length === 0) {
-    return null;
-  }
-  c.feat("match-adt");
-  c = c.sub("match");
-  const a = c.g.pick(closed);
-  const t = adt_inst(c, a, false);
-  if (t === null || t.k !== "adt") {
-    return null;
-  }
-  const name = "ma" + String(c.uid());
-  const scrMany = ty_data(t) && c.g.chance(0.3);
-  const rows = a.ctors.map((ct) => {
-    const { pat, vs, plus } = adt_row(c, t, ct, scrMany);
-    // nested match on the LAST bound field when it is a Bool (a nested
-    // scrutinee must be the pattern's last binder, and not a + binder:
-    // its re-bind opens below the match), else a fold
-    const last = ct.fields[ct.fields.length - 1];
-    const nest = last !== undefined && last.q !== 0 && vs[vs.length - 1]?.ty.k === "bool" && !plus.includes(vs[vs.length - 1]) && c.g.chance(0.3)
-      ? vs[vs.length - 1] : undefined;
-    if (nest !== undefined) {
-      c.feat("match-nest");
-      const rest = vs.filter((v) => v !== nest);
-      const arm = (): string => e_at(num_combine(c, rest.filter((v) => v.ty.k === "u32").map((v) => e_atom(v.name)).concat([num_lit_u32(c)])));
-      return "    case " + pat + ":\n      match " + nest.name + ":\n        case False{}:\n          " + arm() + "\n        case True{}:\n          " + arm();
-    }
-    const parts = vs.map((v) => {
-      if (v.ty.k === "u32") {
-        return e_atom(v.name);
-      }
-      if (v.ty.k === "f32" && c.pure) {
-        return null;
-      }
-      if (ty_open(v.ty)) {
-        return null;
-      }
-      return e_atom(rd_ensure(c, v.ty) + "(" + v.name + ")");
-    }).filter((x): x is E => x !== null);
-    parts.push(num_lit_u32(c));
-    return "    case " + pat + ":\n      " + e_at(num_combine(c, parts));
-  });
-  c.push("def " + name + "(" + (scrMany ? "+" : "") + "x: " + ty_str(t) + ") -> U32:\n  match x:\n" + rows.join("\n"));
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: (scrMany ? 2 : 1) as BQ, t }], ret: U32C });
-  return e_call(name, name + "(" + e_at(syn(c, t, env, Math.min(fuel, 2))) + ")");
-}
-
-// match_list_def : list literal patterns ([+u, v], [], _) over a List<U32>
-function match_list_def(c: Ctx, env: V[], fuel: number): E {
-  c.feat("list-pat");
-  c = c.sub("match");
-  const name = "ml" + String(c.uid());
-  const lt = t_list(Q2, U32C);
-  c.push("def " + name + "(xs: " + ty_str(lt) + ") -> U32:\n  match xs:\n    case [+u, v]:\n      (u * u + v : U32)\n"
-    + "    case []:\n      " + String(c.g.int(64)) + "\n    case _:\n      " + String(c.g.int(1000)));
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 1, t: lt }], ret: U32C });
-  return e_call(name, name + "(" + e_at(syn(c, lt, env, Math.min(fuel, 2))) + ")");
-}
-
-// String / Char dispatch on literals. Literal patterns would desugar to
-// Chr{U32{Word..}} chains — a structural view of a machine word, refused
-// by the C emitter by design — so the tests ride String.eq / U32.is_eq
-// through a Bool continuation instead; SNil/SCon arms stay structural.
-function match_str_def(c: Ctx, env: V[]): E {
-  c.feat("match-str");
-  c = c.sub("match");
-  const name = "sp" + String(c.uid());
-  const lit = str_lit(c, 1 + c.g.int(4));
-  const sl = helper_strlen(c);
-  const bif = "sq" + String(c.uid());
-  c.push("def " + bif + "(z: Bool, rest: U32) -> U32:\n  match z:\n    case False{}:\n      rest\n    case True{}:\n      " + e_at(num_gen_u32(c, [], 1)));
-  c.push("def " + name + "(+s: String) -> U32:\n  match s:\n    case SNil{}:\n      " + String(c.g.int(64))
-    + "\n    case SCon{h, t}:\n      " + bif + "(String.eq(SCon{h, t}, " + lit + "), " + sl + "(s, 7))");
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: STRC }], ret: U32C });
-  const arg = c.g.wpick<() => string>([
-    [40, () => lit],
-    [40, () => e_at(syn(c, STRC, env, 1))],
-    [20, () => "SCon{'" + str_char(c) + "', " + lit + "}"],
-  ])();
-  return e_call(name, name + "(" + arg + ")");
-}
-
-function match_char_def(c: Ctx, env: V[]): E {
-  c.feat("match-char");
-  c = c.sub("match");
-  const name = "cv" + String(c.uid());
-  const c1 = str_char(c);
-  const bif = "cq" + String(c.uid());
-  c.push("def " + bif + "(z: Bool, +n: U32) -> U32:\n  match z:\n    case False{}:\n      (n + " + String(c.g.int(99)) + " : U32)"
-    + "\n    case True{}:\n      " + e_at(num_gen_u32(c, [], 1)));
-  c.push("def " + name + "(c: Char) -> U32:\n  Chr{n} = c\n  +n2 = n\n  " + bif + "(U32.is_eq(n2, " + String(c1.charCodeAt(0)) + "), n2)");
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 1, t: CHARC }], ret: U32C });
-  const arg = c.g.chance(0.4) ? "'" + c1 + "'" : "'" + str_char(c) + "'";
-  return e_call(name, name + "(" + arg + ")");
-}
-
-// Do-notation
-// -----------
-// do Maybe<..>: / do Result<..>: blocks (base's monads); binds are
-// annotated, binders are lone and consumed once.
-
-function do_call_def(c: Ctx, env: V[], fuel: number): E {
-  c = c.sub("do");
-  const which = c.g.pick(["maybe", "result"]);
-  const id = String(c.uid());
-  const name = "dm" + id;
-  const x = "dx" + id;
-  const y = "dy" + id;
-  const henv: V[] = [v_new("k", U32C, true)];
-  // a + on a do bind re-binds it reusable; a do let binds a value
-  const px = c.g.chance(0.4);
-  if (px) {
-    c.feat("plus-do");
-  }
-  // the first bind's value comes before the do let, so it cannot see z
-  const first = e_at(num_gen_u32(c, henv, 1));
-  const dl = c.g.chance(0.4);
-  const z = "dz" + id;
-  if (dl) {
-    c.feat("do-let");
-    henv.push(v_new(z, U32C, true));
-  }
-  const dlet = dl ? "+" + z + " : U32 = " + String(c.g.int(1000)) + "\n    " : "";
-  const xv = v_new(x, U32C, px);
-  if (which === "maybe") {
-    c.feat("do-maybe");
-    const mt = "Maybe<&2, U32>";
-    c.push("def " + name + "(+k: U32) -> " + mt + ":\n  do Maybe<&2, U32>:\n    "
-      + (px ? "+" : "") + x + " : U32 <- Maybe.pure(&2, U32, " + first + ")\n    " + dlet
-      + y + " : U32 <- Some{" + e_at(num_gen_u32(c, henv.concat([xv]), px ? 2 : 1)) + "}\n    "
-      + "return " + e_at(num_combine(c, [e_atom(y), num_gen_u32(c, henv, 0)])));
-    const rd = helper_may(c);
-    return e_call(name, rd + "(" + name + "(" + e_at(num_gen_u32(c, env, Math.min(fuel, 1))) + "), " + num_lit_u32(c).s + ")");
-  }
-  c.feat("do-result");
-  const rt = "Result<&1, &1, String, U32>";
-  const fail = c.g.chance(0.3);
-  const mid = fail
-    ? y + " : U32 <- Fail{" + str_lit(c, 3) + "}"
-    : y + " : U32 <- Result.pure(&1, &1, String, U32, " + e_at(num_gen_u32(c, henv.concat([xv]), px ? 2 : 1)) + ")";
-  c.push("def " + name + "(+k: U32) -> " + rt + ":\n  do Result<&1, &1, String, U32>:\n    "
-    + (px ? "+" : "") + x + " : U32 <- Done{(k + 1 : U32)}\n    " + dlet + mid + "\n    "
-    + "return " + e_at(num_combine(c, [e_atom(y), num_gen_u32(c, henv, 0)])));
-  const un = "ur" + id;
-  const sl = helper_strlen(c);
-  c.push("def " + un + "(r: " + rt + ") -> U32:\n  match r:\n    case Fail{e}:\n      " + sl + "(e, 11)\n    case Done{v}:\n      v");
-  return e_call(un, un + "(" + name + "(" + e_at(num_gen_u32(c, env, Math.min(fuel, 1))) + "))");
-}
-
 // Equality and rewrites
 // ---------------------
 // let_eql : an equality binding proved by {==} over identical renderings
@@ -2961,7 +3100,7 @@ function let_eql(c: Ctx, env: V[]): Line {
   const vars: V[] = [];
   if (c.g.chance(0.5)) {
     c.feat("rwt");
-    const w = "v" + id;
+    const w = bind_name(c, env, [x]);
     lines.push("%" + x + " : U32;");
     lines.push(w + " = " + u32_rhs(num_gen_u32(c, env, 1)));
     binds.push(w);
@@ -3001,7 +3140,7 @@ function theorem_gen(c: Ctx, env: V[]): Line {
   const id2 = String(c.uid());
   const na = "na" + id2;
   const nb = "nb" + id2;
-  const w = "v" + id2;
+  const w = bind_name(c, env);
   const depth = 1 + c.g.int(3);
   const lines = [
     na + " = {" + wrap(depth, Z + "{}") + " : " + N + "}",
@@ -3017,7 +3156,7 @@ function let_eqkit(c: Ctx, env: V[]): Line {
   c.feat("eqkit");
   const id = String(c.uid());
   const x = "qa" + id;
-  const w = "v" + id;
+  const w = bind_name(c, env, [x]);
   const a = num_lit_u32(c);
   const b = num_lit_u32(c);
   const e0 = "U32.add_comm(" + a.s + ", " + b.s + ")";
@@ -3051,7 +3190,7 @@ function let_array(c: Ctx, env: V[]): Line {
   const name = "aru" + id;
   const depth = c.pure ? 2 + c.g.int(3) : 3 + c.g.int(9);
   const elu32 = c.pure || c.g.chance(0.7);
-  const x = "v" + String(c.uid());
+  const x = bind_name(c, env);
   if (elu32) {
     c.feat("array-sugar");
     // U32 elements: get/swap/size/clone all legal. Every pair-returning
@@ -3133,10 +3272,10 @@ function let_array(c: Ctx, env: V[]): Line {
 // Map/Set run as written (no native interception): set/get/has/pop/del/
 // keys/union threading through continuation defs.
 
-function let_map(c: Ctx, _env: V[]): Line {
+function let_map(c: Ctx, env: V[]): Line {
   c.feat("map-ops");
   const id = String(c.uid());
-  const x = "v" + String(c.uid());
+  const x = bind_name(c, env);
   const vT = c.g.pick([U32C, BOOLC, STRC]);
   const q = ty_data(vT) && c.g.chance(0.7) ? Q2 : Q1;
   const mT: T = { k: "map", q, v: vT };
@@ -3205,21 +3344,6 @@ function let_map(c: Ctx, _env: V[]): Line {
 // batch trees with ! GPU marks. Interp-side trees stay shallow; the
 // compiled-only side goes deep.
 
-function batch_ensure(c: Ctx): string {
-  const got = c.memo.get("batch");
-  if (got !== undefined) {
-    return got;
-  }
-  const name = "bt" + String(c.uid());
-  c.memo.set("batch", name);
-  c = c.sub("batch");
-  const leaf = e_at(num_combine(c, [e_bin(e_bin(e_atom("i"), "*", e_atom("2654435761")), ".&.", e_atom("8191")), num_gen_u32(c, [v_new("i", U32C, true)], 1)]));
-  c.push("def " + name + "(+d: Nat, +i: U32) -> U32:\n  match d:\n    case 0n:\n      " + leaf
-    + "\n    case 1n+q:\n      a b = " + name + "(q, (i * 2 : U32)) " + name + "(q, (i * 2 + 1 : U32))\n      "
-    + e_at(num_combine(c, [e_atom("a"), e_atom("b")])));
-  return name;
-}
-
 function gpu_mark(c: Ctx): string {
   if (c.g.chance(0.25)) {
     c.feat("bang");
@@ -3232,16 +3356,12 @@ function let_fork(c: Ctx, env: V[]): Line {
   c.feat("fork");
   const ncalls = c.g.wpick<number>([[55, 2], [20, 3], [15, 4], [10, 8]]);
   const nvals = c.g.chance(0.3) ? 1 + c.g.int(2) : 0;
-  const depth = c.pure ? 2 + c.g.int(4) : 5 + c.g.int(8);
-  const mkcall = (): string => {
-    if (c.g.chance(0.5)) {
-      return batch_ensure(c) + gpu_mark(c) + "(" + String(depth) + "n, " + e_at(num_gen_u32(c, env, 1)) + ")";
-    }
-    return tail_call(c, env, 2).s;
-  };
   const vals: string[] = [];
   for (let i = 0; i < ncalls; i++) {
-    vals.push(mkcall());
+    const e = def_call(c, U32C, env, 2);
+    if (e !== null && e.head !== undefined) {
+      vals.push(e.head + gpu_mark(c) + e.s.slice(e.head.length));
+    }
   }
   for (let i = 0; i < nvals; i++) {
     // riders must be VAR atoms: a parenthesized value would glue onto a
@@ -3258,7 +3378,10 @@ function let_fork(c: Ctx, env: V[]): Line {
     vals[i] = vals[j];
     vals[j] = t;
   }
-  const ks = vals.map(() => "p" + String(c.uid()));
+  const ks: string[] = [];
+  for (const _ of vals) {
+    ks.push(bind_name(c, env, ks));
+  }
   // a + per name re-binds the fork's results reusable (+a +b = f g)
   const plus = c.g.chance(0.3);
   if (plus) {
@@ -3279,8 +3402,8 @@ function let_shared(c: Ctx, env: V[]): Line {
   c.feat("share");
   const id = String(c.uid());
   const s = "sh" + id;
-  const x = "v" + String(c.uid());
-  const y = "v" + String(c.uid());
+  const x = bind_name(c, env);
+  const y = bind_name(c, env, [x]);
   const closed = c.adts.filter((a) => a.ctors.length > 0);
   const inst = closed.length > 0 ? adt_inst(c, c.g.pick(closed), true) : null;
   if (inst !== null && ty_data(inst) && c.g.chance(0.6)) {
@@ -3355,7 +3478,7 @@ function let_ford(c: Ctx, env: V[]): Line {
   const built = casted ? cast + "(n, n, {==}, " + bld + "(n, s))" : bld + "(n, s)";
   c.push("def " + use + "(k: Nat, +s: U32) -> U32:\n  +n = " + toN + "(k)\n  " + eat + "(n, " + built + ", 7)");
   c.defr.push({ name: use, qps: [], tps: [], ps: [{ q: 1, t: NATC }, { q: 2, t: U32C }], ret: U32C, mask: [c.pure ? 12 : 40, null] });
-  const x = "v" + String(c.uid());
+  const x = bind_name(c, env);
   return {
     text: x + " = " + use + "(U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % " + String(c.pure ? 12 : 40) + " : U32)), " + e_at(num_gen_u32(c, env, 1)) + ")",
     binds: [x], vars: [],
@@ -3366,7 +3489,7 @@ function let_ford(c: Ctx, env: V[]): Line {
 // ---------
 
 function let_scalar(c: Ctx, env: V[]): Line {
-  const x = "v" + String(c.uid());
+  const x = bind_name(c, env);
   const keep = bind_keep(c);
   return {
     text: (keep ? "+" : "") + x + " = " + u32_rhs(num_gen_u32(c, env, 2 + c.g.int(3))),
@@ -3384,9 +3507,9 @@ function let_value(c: Ctx, env: V[]): Line {
     return let_scalar(c, env);
   }
   c.feat(t.k === "fun" ? "clo" : "value");
-  const x = "v" + String(c.uid());
-  const y = "v" + String(c.uid());
-  const val = c.mints < 10 && c.g.chance(0.3) ? syn_mint_def(c, t, env) ?? syn(c, t, env, 2) : syn(c, t, env, 2 + c.g.int(2));
+  const x = bind_name(c, env);
+  const y = bind_name(c, env, [x]);
+  const val = c.g.chance(0.3) ? def_new(c, t, env, 2) ?? syn(c, t, env, 2) : syn(c, t, env, 2 + c.g.int(2));
   const keep = ty_data(t) && c.g.chance(0.4);
   const kind = c.g.wpick<string>([
     [50, "plain"],
@@ -3415,17 +3538,10 @@ function let_value(c: Ctx, env: V[]): Line {
 }
 
 function let_call(c: Ctx, env: V[]): Line {
-  const x = "v" + String(c.uid());
+  const x = bind_name(c, env);
   const e = c.g.wpick<() => E>([
-    [16, () => match_nat_def(c, env, 1)],
-    [10, () => match_bool_def(c, env, 1)],
-    [14, () => match_adt_def(c, env, 1) ?? match_nat_def(c, env, 1)],
-    [14, () => tail_call(c, env, 2)],
-    [8, () => match_str_def(c, env)],
-    [6, () => match_char_def(c, env)],
-    [6, () => match_list_def(c, env, 2)],
-    [10, () => do_call_def(c, env, 1)],
-    [10, () => {
+    [60, () => def_call(c, U32C, env, 2) ?? num_gen_u32(c, env, 2)],
+    [8, () => {
       generic_mint(c);
       return syn_call_unify(c, U32C, env, 2) ?? num_gen_u32(c, env, 2);
     }],
@@ -3463,7 +3579,7 @@ function hof_call(c: Ctx, env: V[]): E {
     // a def value at exactly live-1 arguments
     return e_atom(hf + "(" + name + "(" + e_at(num_gen_u32(c, env, 1)) + ", " + e_at(num_gen_u32(c, env, 1)) + "), " + e_at(num_gen_u32(c, env, 1)) + ")");
   }
-  const unary = c.defr.filter((d) => d.qps.length === 0 && d.tps.length === 0 && d.ps.length === 1 && d.ps[0].q === 1 && d.ps[0].t.k === "u32" && d.ret.k === "u32" && (d.mask?.[0] ?? null) === null);
+  const unary = c.defr.filter((d) => d.wip === undefined && d.qps.length === 0 && d.tps.length === 0 && d.ps.length === 1 && d.ps[0].q === 1 && d.ps[0].t.k === "u32" && d.ret.k === "u32" && (d.mask?.[0] ?? null) === null);
   if (tmpl && unary.length > 0 && c.g.chance(0.4)) {
     c.feat("template-def");
     return e_atom(hf + "(~" + c.g.pick(unary).name + ", " + e_at(num_gen_u32(c, env, 1)) + ")");
@@ -3483,7 +3599,7 @@ function hof_call(c: Ctx, env: V[]): E {
 function let_float(c: Ctx, env: V[]): Line {
   c.feat("f32");
   const f = "f" + String(c.uid());
-  const x = "v" + String(c.uid());
+  const x = bind_name(c, env);
   const val = num_gen_f32(c, env, 2 + c.g.int(2));
   const many = c.g.chance(0.4);
   const rhs = c.g.chance(0.7)
@@ -3728,7 +3844,13 @@ function a_step(w: AWalk): void {
   const kit: Array<[number, () => void]> = [
     [15, () => { c.feat("fiber"); const lit = c.g.int(100000); a_fork(w, "IO.pure(U32, " + String(lit) + ")", BigInt(lit), null); }],
     [10, () => { c.feat("fiber"); const lit = c.g.int(100000); a_fork(w, async_ping(c, 1 + c.g.int(6), null, String(lit)) + "()", BigInt(lit), null); }],
-    [8, () => { c.feat("async-batch"); a_fork(w, "IO.pure(U32, " + batch_ensure(c) + gpu_mark(c) + "(" + String(2 + c.g.int(3)) + "n, " + String(c.g.int(1000)) + "))", null, null); }],
+    [8, () => {
+      const e = def_call(c, U32C, [], 2);
+      if (e !== null && e.head !== undefined) {
+        c.feat("async-batch");
+        a_fork(w, "IO.pure(U32, " + e.head + gpu_mark(c) + e.s.slice(e.head.length) + ")", null, null);
+      }
+    }],
     [6, () => { w.rows.push(a_name(w, "u") + " : Unit <- IO.sleep(" + String(1 + c.g.int(4)) + ")"); }],
     [4, () => {
       c.feat("timer");
@@ -3912,6 +4034,14 @@ function io_tail(c: Ctx, seed: bigint): IoTail {
     lines.push("t" + id + "f : Unit <- IO.print_err(\"" + msg + "\")");
     err.push(msg);
   }
+  if (c.g.chance(0.5)) {
+    const e = def_new(c.sub("iodef"), { k: "io", t: U32C }, [], 2);
+    if (e !== null) {
+      lines.push("t" + id + "g : U32 <- " + e.s);
+      lines.push("t" + id + "h : Unit <- IO.print(U32.show(t" + id + "g))");
+      out.push(null);
+    }
+  }
   if (c.g.chance(0.6)) {
     c.feat("async");
     async_tail(c.sub("async"), key, id, lines, out);
@@ -3926,19 +4056,40 @@ function io_tail(c: Ctx, seed: bigint): IoTail {
 
 type Kit = Array<[number, (c: Ctx, e: V[]) => Line]>;
 
-// lines_gen : n statement lines drawn from a kit table, binding into env
+// stmt_bound : the names a statement's text binds (`x = ..`, `+a +b = ..`,
+// `(a, b) = ..`, `x : T <- ..`), a kit's own inner binders included
+function stmt_bound(text: string): string[] {
+  return text.split("\n").flatMap((ln) => {
+    const m = /^\s*([+%\w\s,()]+?)\s*=(?!=)/.exec(ln) ?? /^\s*(\+?\w+)\s*:.*<-/.exec(ln);
+    return m === null ? [] : m[1].match(/[A-Za-z_]\w*/g) ?? [];
+  });
+}
+
+// lines_gen : n statement lines drawn from a kit table, binding into env;
+// a name a line binds shadows the binder of that name in scope, and a
+// result the seal would fold is dropped when a later line rebinds its name
 function lines_gen(c: Ctx, kit: Kit, label: string, n: number, env: V[]): Stmt[] {
   const lines: Stmt[] = [];
+  const bound: string[][] = [];
   for (let i = 0; i < n; i++) {
     const line = c.g.wpick(kit)(c.sub(label), env);
     lines.push({ text: line.text, binds: line.binds });
+    bound.push(stmt_bound(line.text));
+    for (const v of env) {
+      if (bound[i].includes(v.name)) {
+        v.q = "dead";
+      }
+    }
     env.push(...line.vars);
+  }
+  for (let i = 0; i < n; i++) {
+    lines[i].binds = lines[i].binds.filter((b) => !bound.slice(i + 1).some((names) => names.includes(b)));
   }
   return lines;
 }
 
 function stmt_names(lines: Stmt[]): string[] {
-  return lines.flatMap((l) => l.binds);
+  return [...new Set(lines.flatMap((l) => l.binds))];
 }
 
 // gen_member : one seed's whole program. RNG draws are identical for the
@@ -5014,7 +5165,7 @@ async function fuzz_run(): Promise<void> {
   }
   // smoke : hand-verified per-feature cover (re-pick after any edit that
   // remaps seeds: each seed passes solo and the union covers smoke_need)
-  const smoke = [10n, 17n, 18n, 24n, 28n, 31n, 39n, 43n, 52n, 58n, 63n, 78n, 87n, 124n, 133n, 140n, 157n, 176n, 185n, 186n, 202n, 262n];
+  const smoke = [2n, 6n, 7n, 31n, 33n, 39n, 41n, 42n, 55n, 92n, 140n, 142n, 154n, 176n, 183n, 186n, 241n, 262n, 277n, 295n];
   const fixed = SMOKE ? smoke : null;
   const count = fixed?.length ?? COUNT;
   const lanes = "interp+cseq+js" + (THREADS > 0 ? "+par" + String(THREADS) : "") + (WITH_METAL ? "+metal" : "") + (WITH_CUDA ? "+cuda" : "");
@@ -5092,7 +5243,9 @@ async function fuzz_run(): Promise<void> {
   const smoke_need = ["qpoly-def", "qpoly-call", "kind-qvar", "kind-meet", "adt-data", "adt-qpoly",
     "erased-field", "erased-param", "f32-arith", "f32-trans", "f32-conv", "nat-table", "peel",
     "array-ops", "map-ops", "string-append", "match-adt", "do-maybe", "do-result", "fork", "bang",
-    "tail-nat", "tail-list", "tail-str", "tail-adt", "eql", "rwt", "thm", "ford", "share", "partial", "io-tail",
+    "def", "rec", "loop", "match-multi", "wild", "match-nest", "state", "ret-tup", "io-def", "rec-io", "do-io",
+    "match-nat", "match-bool", "match-cmp", "match-str", "match-char", "match-tup", "arr-param", "string-eq", "plus-rebind",
+    "eql", "rwt", "thm", "ford", "share", "partial", "io-tail",
     "fam-nat", "fam-bool", "fam-enum", "fam-use", "fam-unfold", "fam-mk", "fam-rd", "adt-indexed",
     "sig", "sig-value", "empty", "eql-clash", "eql-ne", "refute", "dep-param", "dep-call", "law-where", "or", "pair",
     "template", "f32-bits", "f32-showread", "f32-show", "map-del", "map-keys", "map-from-list", "set-del", "list-map", "io-try",

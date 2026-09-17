@@ -80,6 +80,60 @@ Ported to main `627df664` on 2026-09-15 (the port that followed the
   rides inside a List or Maybe (a Data element); the checker refuses
   it. Erased or dependent fields cannot be printed and are kept out.
 
+Defs are one production, 2026-09-16: the loop kit (`tail_call`), the
+fork tree (`batch_ensure`), the match kits (`match_nat/bool/adt/list/str/
+char_def`), the do-block kit (`do_call_def`) and the def minter
+(`syn_mint_def`) are gone; `def_new(c, goal, env, fuel)` mints every def
+with control flow and the registry's self-call rule (`DefR.wip`) makes it
+recursive. What was rigid before and now falls out of the goal type:
+loops carrying a state record (`state`), tuple-returning walks
+(`ret-tup`), String or record accumulators, multi-scrutinee matches
+with variable rows (`match-multi`, `wild`), tuple and Char patterns,
+nested matches on a row's last binder, tree recursion over datatypes
+with two self fields, IO defs that recurse from inside a do-block
+(`io-def`, `rec-io`), arrays as parameters and fields (`arr-param`), and
+defs of up to ten parameters. Probed rules the production is built on:
+the self-call shrinks at the first live argument that changes and every
+earlier live argument passes through unchanged (a variable row's binder
+counts as the parameter); a variable row after literal rows is a known
+constructor and takes no nested match; a nested scrutinee is the last
+column's last field binder. First sweeps: 8,300 programs, 12 rejects
+(all fixed), and three compiler crash classes the old kits never
+reached: `emit-c: undefined is not an object (evaluating 'arm.k')`,
+`emit-c: a fork's paths hold different values`, `emit-c: Failed to
+parse String to BigInt`; minimal repros `repros/comp_do_result_fail_bind.bend`,
+`repros/comp_fork_family_arg.bend`, `repros/comp_peel_char.bend`.
+
+Binder names, 2026-09-16: a value binder (a let, a fork result, a lambda
+or match binder) is any name the parser takes as a binder that names
+nothing else: not `_`, a keyword, a base name, nor of the shape of a
+minted top-level name (`MINTED`, a stem, a uid and a constructor's
+letter), which another member of a batch may declare; or a fifth of the time the name of a
+binder in scope, which it then shadows (`bind_name`, feature `shadow`,
+in about a third of programs; a drawn name may also collide by chance,
+and the same bookkeeping covers that). Scope bookkeeping follows the
+language: a line's bound names, read off its text (`stmt_bound`, so a
+kit's inner binders count), kill the same-named entries in `env`; a
+lambda binder masks the outer name under it, erased or not
+(`env_bind`); the seal folds a result only while no later line rebinds
+its name. Top-level names keep their uids (a member's ids offset them in
+a batch). Verified forms: a lone binder shadowed before use, a `+`
+binder shadowed, `x = (x + x)`, a match binder re-bound `+x`, a lambda
+binder over an outer name; all three lanes agree.
+
+The nine-hour mixed run, 2026-09-16 (`TRIAGE-2026-09-16-9h.md`): 265,735
+programs, 35 findings, 62 skips. Open compiler classes: `F32.show` rounds
+exact ties to even in C and up in JS; the bracket wall (class D) is back
+for chains of single-use U32 lets; a segment with more than 255 live
+words dies on the `u8` arity table (`arity-wall` skip); a Metal
+miscompile of `0xFFFFFFFF % a0` next to a forking `!` def
+(`repros/comp_metal_two_bangs.bend`). Known noise: `memory fault` and
+zeroed show output on tiny pure mains under machine overload (never
+reproduced, 23 in this run); `emit-c-stack-overflow` skips are
+JavaScriptCore's `RangeError: Out of memory`; timeouts are the
+interpreter under load. Generator: family names clash with base's `F32`;
+the family builder may call itself at a literal index.
+
 Types are terms, 2026-09-16: the dependent-type kit (`let_dep`) went,
 and its shapes, base's Word idiom, propositions and proofs now emerge
 from the one generator:

@@ -122,3 +122,54 @@ fixed), `comp_fuse_lent_literal.bend` (M, fixed),
 `comp_overlay_borrow_word.bend` (N, fixed), `comp_call_chain_cliff.bend`
 (K, open: emit time). Each fixed one crashes or diverges on efead59 and
 matches the interpreter with the fixes.
+
+## comp_metal_two_bangs.bend — batch-only METAL vs C-SEQ, 1 finding (2026-09-16)
+
+    bend comp_metal_two_bangs.bend -o ./m.out
+    ./m.out --gpu off    # 19200 4294965996
+    ./m.out --gpu on     # 19200 4294965866
+
+A `!` loop `tl(p, (4294967295 % a0 : U32))` next to a forking `!` def
+(`a b = bt1(q, ..) bt1(q, ..)`): the device computes `0xFFFFFFFF % 3` as
+`2147483525`; alone, the loop is right. `comp_metal_two_bangs_probe.bend`
+runs the loop at several counts and seeds. The Metal compiler folds the
+constant dividend wrongly in the larger kernel; a `volatile` dividend in
+the emitted C is correct. See `TRIAGE-2026-09-16-9h.md`.
+
+## metal_urem_const/repro.m — the Metal miscompile behind comp_metal_two_bangs, one file
+
+    clang -fobjc-arc -framework Metal -framework Foundation repro.m && ./a.out
+    cpu 0
+    gpu 2147483525
+
+The expression `4294967295u % d` written once (a macro), run on the CPU
+with `d = argc + 2` and inside an embedded Metal kernel with `d = id +
+3`, on one thread. Wrong for divisor 3 with any constant dividend that
+rounds to 2^32 as a float (within 128 of it), for the quotient too;
+right for a runtime dividend or a constant below 4294967168.
+
+## c_bracket_wall_expr.bend — cc-fail, class D back after the emitter rewrite (2026-09-16)
+
+    bend c_bracket_wall_expr.bend -o ./x.out
+    # clang: fatal error: bracket nesting level exceeded maximum of 256
+
+One expression of 86 nested binary ops over two reusable parameters; 85
+compile. Each `U32_BIN` expands to three parenthesis levels and clang
+stops at 256. Sequential lets of the same chain compile (one temporary
+each). See `TRIAGE-2026-09-16-9h.md`.
+
+## comp_peel_char.bend, comp_do_result_fail_bind.bend, comp_fork_family_arg.bend — emit-c crashes (2026-09-16)
+
+    bend comp_peel_char.bend -o x            # SyntaxError: Failed to parse String to BigInt
+    bend comp_do_result_fail_bind.bend -o x  # TypeError: undefined is not an object (evaluating 'arm.k')
+    bend comp_fork_family_arg.bend -o x      # Error: a fork's paths hold different values
+
+Three shapes the old kits never produced, found in the first sweeps of
+the one def production: a peel pattern (`5n+r` then a variable row) in a
+def returning a Char; a Fail bound inside a do-block over Result; a
+parallel let with a call passing a family value at a closed index to a
+dependent parameter. Each checks and runs in the interpreter; each dies
+in the C emitter. The comment in each file names the seed. All three are
+fixed in bend2-core (branch nicolas4: c26e3c30 the table fold, 0767efad
+the constructor built at its position, b48b4753 the fork's held box);
+tests/run/ctr_at_position and tests/run/fork_held_family pin the last two.
