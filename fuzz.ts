@@ -4369,7 +4369,7 @@ async function worker_main(): Promise<void> {
   };
   // book_of : the program's `import Base` is the pre-seeded base, so the
   // rest parses straight from the string
-  const book_of = async (src: string): Promise<{ book?: unknown; err?: string; skip?: string }> => {
+  const book_of = async (src: string): Promise<{ book?: unknown; err?: string; range?: unknown }> => {
     const book = bend.book_nil();
     try {
       const base = await base_seed() as { tlds: Record<string, unknown>; ctrs: Record<string, unknown>; order: string[]; tmps: Record<string, unknown> };
@@ -4392,7 +4392,7 @@ async function worker_main(): Promise<void> {
       return { book };
     } catch (e) {
       if (e instanceof RangeError) {
-        return { skip: "check-stack-overflow" };
+        return { range: e };
       }
       if (is_err(e)) {
         return { err: err_str(e) };
@@ -4406,15 +4406,26 @@ async function worker_main(): Promise<void> {
     const reply = (r: WorkerRes): void => {
       process.stdout.write(JSON.stringify(r) + "\n");
     };
-    let checked: { book?: unknown; err?: string; skip?: string };
+    // a RangeError is a stack overflow when it says so, else JavaScriptCore
+    // out of memory: the worker answers and exits, the pool respawns it and
+    // retries the request once
+    const range = (stage: string, e: unknown, def?: string): void => {
+      const oom = !/call stack/i.test(String((e as Error).message));
+      process.stdout.write(JSON.stringify({ id: req.id, verdict: "skip", stage: stage + (oom ? "-oom" : "-stack-overflow"), err: err_str(e), def }) + "\n", () => {
+        if (oom) {
+          process.exit(0);
+        }
+      });
+    };
+    let checked: { book?: unknown; err?: string; range?: unknown };
     try {
       checked = await book_of(req.src);
     } catch (e) {
       reply({ id: req.id, verdict: "crash", stage: "check", err: err_str(e) });
       return;
     }
-    if (checked.skip !== undefined) {
-      reply({ id: req.id, verdict: "skip", stage: checked.skip });
+    if (checked.range !== undefined) {
+      range("check", checked.range);
       return;
     }
     if (checked.err !== undefined) {
@@ -4435,7 +4446,7 @@ async function worker_main(): Promise<void> {
           shown = bend.term_show(bend.term_lower(bend.term_snf(book, bend.Ref(def))));
         } catch (e) {
           if (e instanceof RangeError) {
-            reply({ id: req.id, verdict: "skip", stage: "interp-stack-overflow", def });
+            range("interp", e, def);
           } else {
             reply({ id: req.id, verdict: "crash", stage: "interp", err: err_str(e), def });
           }
@@ -4456,7 +4467,7 @@ async function worker_main(): Promise<void> {
         return f();
       } catch (e) {
         if (e instanceof RangeError) {
-          reply({ id: req.id, verdict: "skip", stage: stage + "-stack-overflow" });
+          range(stage, e);
         } else {
           reply({ id: req.id, verdict: "crash", stage, err: err_str(e) });
         }
@@ -4535,7 +4546,9 @@ class Pool {
       if (p !== undefined) {
         clearTimeout(p.timer);
         this.pending.delete(res.id);
-        slot.busy = false;
+        // a worker that answered out of memory is exiting: it takes no
+        // more work until its exit respawns it
+        slot.busy = res.verdict === "skip" && (res.stage ?? "").endsWith("-oom");
         slot.reqId = null;
         p.resolve(res);
         this.drain();
@@ -4564,12 +4577,13 @@ class Pool {
     w.proc.stdin?.write(JSON.stringify(req) + "\n");
   }
 
-  run(src: string, mode: WorkerMode, defs?: string[]): Promise<WorkerRes> {
+  async run(src: string, mode: WorkerMode, defs?: string[], retry = true): Promise<WorkerRes> {
     const req: WorkerReq = { id: this.nextId++, src, mode, defs };
-    return new Promise((resolve) => {
+    const res = await new Promise<WorkerRes>((resolve) => {
       this.queue.push({ req, resolve });
       this.drain();
     });
+    return retry && res.verdict === "skip" && (res.stage ?? "").endsWith("-oom") ? this.run(src, mode, defs, false) : res;
   }
 
   close(): void {
@@ -4786,7 +4800,7 @@ async function member_interp(ms: MemberState): Promise<void> {
       return;
     }
     if (w.verdict === "skip") {
-      save_file("skipped", m.seed, ["SKIPPED reason=raw-" + (w.stage ?? "?")], src);
+      save_file("skipped", m.seed, ["SKIPPED reason=raw-" + (w.stage ?? "?"), w.err ?? ""], src);
       ms.verdict = { kind: "skip", note: "raw-" + (w.stage ?? "?") };
       return;
     }
@@ -4817,7 +4831,7 @@ async function member_interp(ms: MemberState): Promise<void> {
   }
   if (oracle.verdict === "skip" || w.verdict === "skip") {
     const why = oracle.verdict === "skip" ? "raw-" + (oracle.stage ?? "?") : (w.stage ?? "?");
-    save_file("skipped", m.seed, ["SKIPPED reason=" + why], src);
+    save_file("skipped", m.seed, ["SKIPPED reason=" + why, (oracle.verdict === "skip" ? oracle.err : w.err) ?? ""], src);
     ms.verdict = { kind: "skip", note: why };
     return;
   }
@@ -4866,7 +4880,7 @@ function group_expect(states: MemberState[]): { exp: Expect; transLines: number[
   return { exp: { out, err, code }, transLines };
 }
 
-async function group_compiled(states: MemberState[], solo: boolean): Promise<{ fail: string | null; skip: string | null; ulp: boolean }> {
+async function group_compiled(states: MemberState[], solo: boolean): Promise<{ fail: string | null; skip: string | null; err?: string; batch?: string; ulp: boolean }> {
   const live = states.filter((s) => s.verdict === null);
   if (live.length === 0) {
     return { fail: null, skip: null, ulp: false };
@@ -4875,7 +4889,7 @@ async function group_compiled(states: MemberState[], solo: boolean): Promise<{ f
   const src = assemble(members, "sealed");
   const w = await phase("worker:emit", () => pool.run(src, "emit"));
   if (w.verdict === "skip") {
-    return { fail: null, skip: w.stage ?? "emit-skip", ulp: false };
+    return { fail: null, skip: w.stage ?? "emit-skip", err: w.err, batch: src, ulp: false };
   }
   // a segment holding over 255 live words (a list literal of hundreds of
   // calls) is refused by the emitter: a limit, counted as a skip
@@ -5011,7 +5025,10 @@ async function test_members(states: MemberState[], solo: boolean): Promise<Verdi
   if (res.skip !== null) {
     for (const s of grouped) {
       if (s.verdict === null) {
-        save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip], assemble([s.m], "sealed"));
+        save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip, res.err ?? ""], assemble([s.m], "sealed"));
+        if (res.batch !== undefined && res.batch !== assemble([s.m], "sealed")) {
+          save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip + " (the batch that skipped)", res.err ?? ""], res.batch, "-batch");
+        }
         s.verdict = { kind: "skip", note: res.skip };
       }
     }

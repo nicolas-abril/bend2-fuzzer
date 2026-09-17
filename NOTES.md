@@ -129,8 +129,11 @@ words dies on the `u8` arity table (`arity-wall` skip); a Metal
 miscompile of `0xFFFFFFFF % a0` next to a forking `!` def
 (`repros/comp_metal_two_bangs.bend`). Known noise: `memory fault` and
 zeroed show output on tiny pure mains under machine overload (never
-reproduced, 23 in this run); `emit-c-stack-overflow` skips are
-JavaScriptCore's `RangeError: Out of memory`; timeouts are the
+reproduced, 23 in this run); `emit-c-stack-overflow` skips were
+JavaScriptCore's `RangeError: Out of memory` under machine load (the members
+compile alone in 0.1 s and the sweep replays clean): a RangeError now skips
+as `-oom` unless it names the call stack, the worker exits on it and the
+pool retries the request once in a fresh one; timeouts are the
 interpreter under load. Generator: family names clash with base's `F32`;
 the family builder may call itself at a literal index.
 
