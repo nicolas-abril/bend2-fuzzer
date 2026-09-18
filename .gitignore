@@ -1,2 +1,5 @@
 findings/
+minimized/
+repros/
+TRIAGE-*.md
 node_modules
