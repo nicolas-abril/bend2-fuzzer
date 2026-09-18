@@ -185,6 +185,7 @@ const ROOT: string = ROOT0;
 const BEND_TS = path.join(ROOT, "bend2", "bend.ts");
 const COMP_TS = path.join(ROOT, "bend2", "comp.ts");
 const FINDINGS = path.join(import.meta.dirname, "findings");
+const WORKER_LIFE = 300;
 const WORKER_TIMEOUT = 45_000;
 const CC_TIMEOUT = 120_000;
 const RUN_TIMEOUT = 20_000;
@@ -2174,7 +2175,12 @@ function builder_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
     c.push("def " + name + "(+n: Nat, +s: U32) -> " + ty_str(t) + ":\n  match n:\n    case 0n:\n      "
       + brow + "\n    case 1n+p:\n      " + rec.name + "{" + fld(rec, name + "(p, (s * 3 + 7 : U32))").join(", ") + "}");
   }
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: NATC }, { q: 2, t: U32C }], ret: t, mask: [8 + c.g.int(8), null] });
+  // a builder whose constructor holds k self fields makes k^n nodes: its
+  // depth keeps a value under 128 nodes, the interpreter's budget (a
+  // ternary one at depth 7 took the raw leg 45 s, the C leg 0.2 s)
+  const k = rec.fields.filter(is_self).length;
+  const depth = k <= 1 ? 8 + c.g.int(8) : 2 + c.g.int(Math.floor(Math.log2(128) / Math.log2(k)) - 1);
+  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: NATC }, { q: 2, t: U32C }], ret: t, mask: [depth, null] });
   return name;
 }
 
@@ -4341,7 +4347,12 @@ function worker_decode(shown: string): string | null {
 
 async function worker_main(): Promise<void> {
   const bend = await import(pathToFileURL(BEND_TS).href);
-  const comp = await import(pathToFileURL(COMP_TS).href);
+  // the emitter keeps tables for the life of its module (layouts by type
+  // and constructor name among them), so every emission takes a fresh
+  // instance of it: a query on the import defeats the module cache (on a
+  // plain path; bun folds a file: URL's query away)
+  const comp_fresh = async (id: number): Promise<{ compile_book: (b: unknown) => string; js_book: (b: unknown) => string }> =>
+    await import(COMP_TS + "?r=" + String(id));
   const is_err = (e: unknown): boolean => typeof e === "object" && e !== null && (e as { $?: string }).$ === "Err";
   const err_str = (e: unknown): string => {
     if (typeof e === "string") {
@@ -4479,6 +4490,7 @@ async function worker_main(): Promise<void> {
         return null;
       }
     };
+    const comp = await comp_fresh(req.id);
     const csrc = emit("emit-c", () => comp.compile_book(book));
     const jssrc = csrc === null ? null : emit("emit-js", () => comp.js_book(book));
     if (csrc !== null && jssrc !== null) {
@@ -4495,7 +4507,7 @@ async function worker_main(): Promise<void> {
 // -----------
 
 type Pending = { resolve: (r: WorkerRes) => void; timer: NodeJS.Timeout };
-type Slot = { proc: child.ChildProcess; busy: boolean; reqId: number | null; expired: boolean; errbuf: string };
+type Slot = { proc: child.ChildProcess; busy: boolean; reqId: number | null; expired: boolean; errbuf: string; served: number };
 
 class Pool {
   workers: Slot[] = [];
@@ -4514,7 +4526,7 @@ class Pool {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: ROOT,
     });
-    const slot: Slot = { proc, busy: false, reqId: null, expired: false, errbuf: "" };
+    const slot: Slot = { proc, busy: false, reqId: null, expired: false, errbuf: "", served: 0 };
     proc.stdin?.on("error", () => {});
     proc.stderr?.on("data", (d: Buffer) => {
       slot.errbuf = (slot.errbuf + String(d)).slice(-8192);
@@ -4551,9 +4563,15 @@ class Pool {
       if (p !== undefined) {
         clearTimeout(p.timer);
         this.pending.delete(res.id);
-        // a worker that answered out of memory is exiting: it takes no
-        // more work until its exit respawns it
-        slot.busy = res.verdict === "skip" && (res.stage ?? "").endsWith("-oom");
+        // a worker that answered out of memory is exiting, and one that
+        // has served its life retires: neither takes more work until its
+        // exit respawns it (the compiler's memory grows for the life of a
+        // process, and six workers over hours had the run killed twice)
+        slot.served += 1;
+        slot.busy = (res.verdict === "skip" && (res.stage ?? "").endsWith("-oom")) || slot.served >= WORKER_LIFE;
+        if (slot.served >= WORKER_LIFE) {
+          slot.proc.kill();
+        }
         slot.reqId = null;
         p.resolve(res);
         this.drain();
@@ -4579,6 +4597,9 @@ class Pool {
       w.proc.kill("SIGKILL");
     }, WORKER_TIMEOUT);
     this.pending.set(req.id, { resolve, timer });
+    if (process.env.FUZZ_TRACE_DIR !== undefined) {
+      fs.writeFileSync(path.join(process.env.FUZZ_TRACE_DIR, String(req.id).padStart(6, "0") + "-" + req.mode + ".bend"), req.src);
+    }
     w.proc.stdin?.write(JSON.stringify(req) + "\n");
   }
 
@@ -4983,6 +5004,11 @@ async function group_compiled(states: MemberState[], solo: boolean): Promise<{ f
         return { fail: label + " GPU BUILD FAILURE:\n" + (gb.err + gb.out).slice(0, 2000) };
       }
       const f = await lane(label, true, (env) => phase("run:" + lname, () => leg_run(path.join(dir, bin), ["--gpu", "on"], dir, GPU_RUN_TIMEOUT * Math.max(1, members.length), env)));
+      // the device holds no F32.show or F32.read: a bang reaching one
+      // fail-stops there by design, a known limit rather than a finding
+      if (f !== null && /a function the device does not hold/.test(f)) {
+        return { skip: lname + "-host-only" };
+      }
       return f !== null ? { fail: f } : {};
     });
     const lanes: Array<[boolean, string, string[], string]> = [
