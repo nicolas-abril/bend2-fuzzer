@@ -1,6 +1,6 @@
 {
   "name": "bend2-fuzzer",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Differential fuzzer for the bend2-core toolchain (interp vs C vs JS, with CPU/Metal/CUDA lanes)",
   "type": "module",
   "devDependencies": {

@@ -116,8 +116,9 @@ language: a line's bound names, read off its text (`stmt_bound`, so a
 kit's inner binders count), kill the same-named entries in `env`; a
 lambda binder masks the outer name under it, erased or not
 (`env_bind`); the seal folds a result only while no later line rebinds
-its name. Top-level names keep their uids (a member's ids offset them in
-a batch). Verified forms: a lone binder shadowed before use, a `+`
+its name. Batched top-level names keep uid suffixes; unrestricted-name
+books run solo and draw declarations, constructors, fields and binders from
+the shared identifier distribution. Verified forms: a lone binder shadowed before use, a `+`
 binder shadowed, `x = (x + x)`, a match binder re-bound `+x`, a lambda
 binder over an outer name; all three lanes agree.
 
@@ -125,7 +126,7 @@ The nine-hour mixed run, 2026-09-16 (`TRIAGE-2026-09-16-9h.md`): 265,735
 programs, 35 findings, 62 skips. Open compiler classes: `F32.show` rounds
 exact ties to even in C and up in JS; the bracket wall (class D) is back
 for chains of single-use U32 lets; a segment with more than 255 live
-words dies on the `u8` arity table (`arity-wall` skip); a Metal
+words dies on the `u8` arity table (now a finding); a Metal
 miscompile of `0xFFFFFFFF % a0` next to a forking `!` def
 (`repros/comp_metal_two_bangs.bend`). Known noise: `memory fault` and
 zeroed show output on tiny pure mains under machine overload (never
@@ -391,14 +392,11 @@ drowns real signal. Delta-reduced repros for all of these sit in
   `comp_family_arm_layout_2.bend`, `comp_family_arm_ctor_layout.bend`,
   `comp_family_arm_char_layout.bend`; details in `TRIAGE-2026-09-16.md`.
   Expect this class as noise until the emitter computes layouts per arm.
-- **`arity-wall` skips** (2026-09-16): the emitter refuses a segment
-  holding over 255 live words (`an arity over 255`, `FID_ARITY_T` is a
-  u8 table), which a list literal of hundreds of calls reaches (every
-  built element stays live across the next call's continuation). The
-  harness counts the refusal as a skip, not a finding: it is a documented
-  limit, loud, and the generator's own `stretch` lists are what hit it
-  (1 in 21k seeds). The old class K (an emit-time cliff on the same
-  shape) is this wall's slow neighbour.
+- **`an arity over 255` is a finding** (reclassified 2026-09-21): a checked
+  program that reaches the emitter's `u8` metadata boundary is a compiler
+  failure. The harness no longer suppresses it. This covers both large live
+  segments and flattened monomorphic layouts; triage must distinguish the
+  source shape rather than treating the diagnostic as a resource limit.
 - **One-off, unreproduced (2026-09-16)**: seed 1363374988789664739 (a
   show program, `def main() -> Maybe<&2, D1>: Some{D1a{0n, Nil{}}}`, 31
   lines) failed C-SEQ with `bend: memory fault (machine stack overflow?)`
@@ -448,6 +446,32 @@ drowns real signal. Delta-reduced repros for all of these sit in
   effects, `--gpu-memory` exhaustion behavior, ASan/UBSan.
 
 ## Validation recipe after touching the generator
+
+The 2026-09-21 coverage is compositional in `fuzz.ts`: Base presence, the
+initial name set, declaration and binder names, datatype shapes and surface
+terms are independent generator choices. No-Base books use the same type and
+term productions. Base only contributes occupied initial names. The general
+identifier grammar samples random shapes plus full words and recombined
+fragments derived mechanically from all Bend sources and reflected JavaScript
+host properties, rather than a hand-written list of known-sensitive spellings.
+Declaration names may also prepend or append a newly generated identifier to
+the final segment of any declaration already present in the book; the source
+and derived name therefore compose with every declaration role.
+No-Base books then run through the checker and interpreter because the
+emitters require Base's runtime types. `keys.ts` remains a separate oracle
+because its parser grammar intentionally includes ill-typed and incomplete
+terms. There is no independent evaluator, negative-checker sweep or generated
+FFI. `campaign.ts` serializes the main differential generator and parser/key
+oracle, stopping when either saves a finding or reports a resource skip. A GPU
+path reaching `F32.show` or `F32.read` is
+the reviewed `metal-host-only` / `cuda-host-only` eligibility class; the
+campaign records it and continues because the device intentionally omits those
+operations. Other skip classes pause for triage.
+
+The earlier isolated-lane validation against Bend 2.0.22 is historical; rerun
+the recipe below after this integration. In particular, emitter failures from
+surface forms and unrestricted names are findings to triage, not reasons to
+route those productions around the compiled backends.
 
 1. `bunx tsc --noEmit` in this repo — clean.
 2. A reject sweep: `for s in $(seq 1 120); do` dump + `--check` each seed;

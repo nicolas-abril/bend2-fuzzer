@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["fuzz.ts"]
+  "include": ["fuzz.ts", "keys.ts", "campaign.ts"]
 }

@@ -38,7 +38,8 @@ cross-leg where a batch value rides in.
 
 Any disagreement, rejection of generated source, internal crash, or C run
 that outlives its cap while the interpreter finished (livelock suspect) is a
-finding; resource blowups (timeouts, stack overflows) are persisted skips.
+finding. Checker/worker stack, memory and timeout exhaustion is persisted as a
+skip; compiled CPU and GPU run timeouts are findings.
 
 ## Usage
 
@@ -67,7 +68,10 @@ bun ../bend2-fuzzer/fuzz.ts [count] [--seed N] [options]
 | `--cuda` | also build with `-DBEND_CUDA` and run `--gpu on` (Linux + NVIDIA) |
 | `--opt N` | clang `-O` level for the C legs (default 1) |
 | `--io-pct N` | percent of seeds carrying an IO tail (default 20) |
-| `--show-pct N` | percent of seeds that are a pure `main` printed as its literal (default 8) |
+| `--show-pct N` | percent of Base seeds that are a pure `main` printed as its literal (default 8) |
+| `--no-base-pct N` | percent of books starting without Base (default 12) |
+| `--name-pct N` | percent of solo books using unrestricted declaration names (default 20) |
+| `--surface-pct N` | chance per synthesis node of a surface wrapper (default 8) |
 | `--check-only` | stop after check + interp + emission (no cc, no runs) |
 | `--smoke` | fixed seed set that must cover a feature checklist and pass |
 | `--loop` | run continuously |
@@ -99,8 +103,18 @@ production: parameters drawn as types, a match over some of them, leaves
 synthesized against the goal, and a self-call allowed only on a
 sub-field of the decreasing column, so loops over state records,
 tuple-returning walks, tree recursion, multi-scrutinee matches and IO
-loops are the same thing at different goals. Binder names come from a small pool and
-sometimes shadow a name in scope, so name resolution is exercised too. Types are terms: the generator also mints
+loops are the same thing at different goals. Declarations, constructors,
+fields and binders draw from one identifier distribution, and binders
+sometimes shadow a live name, so name resolution composes with every other
+production. Base is an initial-environment choice: without it, its names are
+free. The identifier grammar mixes random characters and length boundaries
+with full identifiers and recombined fragments mechanically collected from the
+whole Bend implementation and reflected JavaScript host properties. Thus Base
+and host-sensitive spellings stay in the sampled space without a hand-written
+exception list. A declaration can also take any earlier declaration and
+concatenate another generated name before or after its final namespace segment,
+covering compiler-generated suffix and prefix collisions. The same datatype, family, definition, match and value productions
+build a book from an empty namespace. Types are terms: the generator also mints
 families, type-level defs by match on an index (`law F: for x: Nat;
 Data` filled by `def F(x): match x: ..`), whose arms may be datatypes
 indexed by the arm's sub-index and holding the family at it (Word's
@@ -151,3 +165,37 @@ Curated repros of open compiler bugs live in `repros/`.
 the currently-open compiler bug classes (expected finding noise), and the
 validation recipe. The long doc comment at the top of `fuzz.ts` is the
 design spec proper.
+
+## Parser and specialization oracle
+
+Inline matches on computed terms, default continuations, applied lambdas,
+expression rewrites, constructor destructuring, erased local lets and
+annotations are ordinary `fuzz.ts` productions. They can occur in Base or
+no-Base books beside any compatible type or term production. No-Base books run
+through the checker and interpreter; the C and JS emitters require Base for
+their runtime types.
+
+`keys.ts` has two parts. Its parser-only grammar admits incomplete and
+ill-typed terms and compares `term_key` against an independent structural
+encoding. Its end-to-end cases are checker-valid no-Base books with two legal
+specializations of the same template, covering explicit word trees, NaN
+payloads and signs, `nan`/`inf` references, and annotations within and around
+word chains. Distinct syntax must allocate distinct template instances, and
+payload-distinct values must normalize distinctly.
+
+Run the lanes against an explicit checkout:
+
+```sh
+bun fuzz.ts 2048 --seed 1
+bun keys.ts --root /path/to/bend --fuzz 3000 --seed 1
+```
+
+`campaign.ts` rotates through the compositional differential generator and
+the parser/key oracle in separate processes. The runs never overlap. It stops on the first
+nonzero lane or reported resource skip so the saved artifact can be triaged
+before resuming. The reviewed `metal-host-only` and `cuda-host-only` eligibility
+skips are recorded and allowed to continue:
+
+```sh
+bun campaign.ts --root /path/to/bend --minutes 360 --threads 8 --metal
+```
