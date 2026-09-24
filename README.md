@@ -20,6 +20,23 @@ spellings (raw and identity-sealed) and cross-checks every leg:
   Maybe, a program datatype, an Array of U32). The C and JS runtimes
   compute it and print it as a literal at run time; the interpreter's
   `term_show` of the normal form is the expectation.
+- **modules** (`--module-pct`): the members are split over files that
+  import each other by relative, `../`, absolute, symlinked or hub
+  (`0x<hash>/`) paths under random aliases, one file reached through two
+  paths, all run through the same legs.
+- **effects** (`--effect-pct`): a member declares its own datatype and a
+  foreign `IO` def backed by generated `.c`/`.js` files that build the
+  datatype through `CID(..)` and register with `io_eff(CID(..), ..)`; the
+  expected prints are known to the generator.
+- **clash** (`--clash-pct`): a passing member is mutated into a program
+  that must be refused with a known message: a Base or root name
+  redeclared, an alias given twice, an alias shadowing a dotted name or a
+  declaration, a path with a bad segment, an inner `..`, a symlink to a
+  bad name, a hub file escaping the hub, a bad def name, an unknown
+  `CID`, a constructor named like an effect, one effect file imported from
+  two namespaces, an effect registered twice. Acceptance
+  (`clash-accepted`), another error (`clash-other`) or a crash is a
+  finding.
 
 Programs carry a compiled-only `extra` def (F32 — stuck in the interpreter
 by design — deep fork trees with `!` marks, long loops) compared across the
@@ -71,6 +88,9 @@ bun ../bend2-fuzzer/fuzz.ts [count] [--seed N] [options]
 | `--show-pct N` | percent of Base seeds that are a pure `main` printed as its literal (default 8) |
 | `--no-base-pct N` | percent of books starting without Base (default 12) |
 | `--name-pct N` | percent of solo books using unrestricted declaration names (default 20) |
+| `--module-pct N` | percent of seeds laid out as several files (a batch holds one layout) (default 25) |
+| `--effect-pct N` | percent of Base seeds carrying a generated foreign effect (default 25) |
+| `--clash-pct N` | percent of seeds whose passing member is also checked as a clash mutant (default 15) |
 | `--surface-pct N` | chance per synthesis node of a surface wrapper (default 8) |
 | `--check-only` | stop after check + interp + emission (no cc, no runs) |
 | `--smoke` | fixed seed set that must cover a feature checklist and pass |
@@ -150,6 +170,7 @@ plainly and once per dying member, every leg alike.
 
 Findings land in `findings/` (git-ignored) as standalone `.bend` files with
 a verdict header and exact repro line; resource skips in `findings/skipped/`.
+`FZ_FINDINGS=dir` sends them elsewhere.
 The generator is version-controlled but findings are not: a generator edit
 remaps the seeds whose draws pass through the edited site (every statement,
 minted def and adt draws from its own split of the seed's stream, so the

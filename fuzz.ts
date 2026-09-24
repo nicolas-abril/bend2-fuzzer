@@ -184,7 +184,8 @@ if (ROOT0 === undefined) {
 const ROOT: string = ROOT0;
 const BEND_TS = path.join(ROOT, "bend2", "bend.ts");
 const COMP_TS = path.join(ROOT, "bend2", "comp.ts");
-const FINDINGS = path.join(import.meta.dirname, "findings");
+// FZ_FINDINGS : where a run saves, the repo's findings/ by default
+const FINDINGS = process.env.FZ_FINDINGS ?? path.join(import.meta.dirname, "findings");
 const WORKER_LIFE = 300;
 const WORKER_TIMEOUT = 45_000;
 const CC_TIMEOUT = 120_000;
@@ -202,7 +203,8 @@ const cli_opt = (s: string, d: string): string => {
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : d;
 };
 const VALUED_FLAGS = ["--seed", "--jobs", "--threads", "--opt", "--batch", "--pool",
-  "--io-pct", "--show-pct", "--no-base-pct", "--name-pct", "--surface-pct", "--reduce"];
+  "--io-pct", "--show-pct", "--no-base-pct", "--name-pct", "--surface-pct", "--reduce",
+  "--module-pct", "--effect-pct", "--clash-pct"];
 const COUNT = Number(argv.find((a, i) => /^\d+$/.test(a) && !VALUED_FLAGS.includes(argv[i - 1] ?? "")) ?? "100");
 const BASE_SEED = BigInt(cli_opt("--seed", String(Math.floor(Math.random() * 2 ** 48))));
 const JOBS = Number(cli_opt("--jobs", String(Math.max(1, Math.min(8, os.cpus().length - 2)))));
@@ -216,6 +218,9 @@ const SHOW_PCT = Math.max(0, Math.min(100, Number(cli_opt("--show-pct", "8"))));
 const NO_BASE_PCT = Math.max(0, Math.min(100, Number(cli_opt("--no-base-pct", "12"))));
 const FREE_NAME_PCT = Math.max(0, Math.min(100, Number(cli_opt("--name-pct", "20"))));
 const SURFACE_PCT = Math.max(0, Math.min(100, Number(cli_opt("--surface-pct", "8"))));
+const MODULE_PCT = Math.max(0, Math.min(100, Number(cli_opt("--module-pct", "25"))));
+const EFFECT_PCT = Math.max(0, Math.min(100, Number(cli_opt("--effect-pct", "25"))));
+const CLASH_PCT = Math.max(0, Math.min(100, Number(cli_opt("--clash-pct", "15"))));
 const KEEP = cli_flag("--keep");
 const PROFILE = cli_flag("--profile");
 const BATCH = Math.max(1, Math.min(64, Number(cli_opt("--batch", "8"))));
@@ -253,6 +258,12 @@ function print_help(): void {
     "  --no-base-pct N percent of books generated without importing Base (default 12)",
     "  --name-pct N    percent of books using unrestricted declaration names (default 20)",
     "  --surface-pct N chance per synthesis node of a surface wrapper (default 8)",
+    "  --module-pct N  percent of seeds laid out as modules: each member a file",
+    "                  under a generated path the entry imports (default 25)",
+    "  --effect-pct N  percent of Base seeds carrying a foreign effect (a .c and",
+    "                  a .js building the member's constructors; default 25)",
+    "  --clash-pct N   percent of seeds whose module layout is also mutated by",
+    "                  one name clash that must be refused (default 15)",
     "  --check-only   stop after check + interp + emission (no cc, no runs)",
     "  --syntax       compatibility alias; surface forms are always generated",
     "  --show-pct N   percent of seeds that are a pure main printed as its literal (default 8)",
@@ -3456,9 +3467,12 @@ function theorem_gen(c: Ctx, env: V[]): Line {
     + "  match a:\n    case " + Z + "{}:\n      {==}\n    case " + S + "{p}:\n      %" + th + "(p, b) : {"
     + wrap(m, add + "(p, " + S + "{b})") + " == " + wrap(m - 1, S + "{_}") + " : " + N + "};\n      {==}");
   // use the theorem live: bind nats, rewrite with a constant motive
-  const id2 = String(c.uid());
+  let id2 = String(c.uid());
+  while (c.names.has("na" + id2) || c.names.has("nb" + id2)) id2 = String(c.uid());
   const na = "na" + id2;
   const nb = "nb" + id2;
+  c.names.add(na);
+  c.names.add(nb);
   const w = bind_name(c, env);
   const depth = 1 + c.g.int(3);
   const lines = [
@@ -3978,7 +3992,16 @@ type Member = {
   entries: string[];
   feats: string[];
   trans: boolean;
+  eff: Eff | null;
 };
+
+// Eff : a foreign effect of the member's own. A datatype with a nullary and
+// a U32-field constructor, a foreign def whose .c and .js build them through
+// CID(..) and register with io_eff, and a reader that prints the value. The
+// names come from the member's own distribution (free names included), so
+// CID resolution, the C id table, the JS tags and the registration keys all
+// meet them. calls: each call's argument and the line it prints.
+type Eff = { file: string; decls: string[]; c: string; js: string; name: string; ty: string; show: string; ctors: string[]; calls: Array<[number, string]> };
 
 // Show programs
 // -------------
@@ -4451,6 +4474,47 @@ function stmt_names(lines: Stmt[]): string[] {
 // gen_member : one seed's whole program. RNG draws are identical for the
 // raw and sealed spellings (the seal is string assembly over one extra
 // unconditional draw), so the two books differ only in result's reply.
+// eff_new : the member's effect (see Eff); its files are named after the
+// seed, so the members of a batch keep theirs apart
+function eff_new(c: Ctx, seed: bigint): Eff {
+  const file = "fze" + (seed & 0xffffffffffffn).toString(16);
+  const ty = decl_name(c, "ft");
+  const ctors = [decl_name(c, "fk"), decl_name(c, "fk")];
+  const name = decl_name(c, "fe");
+  const show = decl_name(c, "fs");
+  let field = identifier(c, false);
+  while (KEYWORDS.includes(field)) {
+    field = identifier(c, false);
+  }
+  const b = bind_name(c, []);
+  c.feat("effect");
+  if (c.freeNames) {
+    c.feat("effect-free-name");
+  }
+  const decls = [
+    "type " + ty + " is Data:\n  " + ctors[0] + "{}\n  " + ctors[1] + "{" + field + ": U32}",
+    "def " + name + "(n: U32) -> IO(" + ty + "):\n  import \"./" + file + ".c\"\n  import \"./" + file + ".js\"",
+    "def " + show + "(t: " + ty + ") -> String:\n  match t:\n    case " + ctors[0] + "{}:\n      \"none\"\n    case "
+      + ctors[1] + "{" + b + "}:\n      U32.show(" + b + ")",
+  ];
+  const csrc = "Term " + file + "_run(Env e, Term* f, IoWork* w) {\n  u32 n = (u32)f[0];\n"
+    + "  return n % 2 == 0 ? term_pak(CID(" + ctors[0] + "), 0)\n    : term_pak(CID(" + ctors[1] + "), (u32)(n * 3u + 1u));\n}\n\n"
+    + "static void __attribute__((constructor)) " + file + "_use(void) {\n  io_eff(CID(" + name + "), " + file + "_run, 0);\n}\n";
+  const jssrc = "function " + file + "(n) {\n  return n % 2 === 0 ? { $: CID(" + ctors[0] + ") }\n    : { $: CID(" + ctors[1] + "), ["
+    + JSON.stringify(field) + "]: (n * 3 + 1) >>> 0 };\n}\n\nio_eff(CID(" + name + "), " + file + ");\n";
+  const calls: Array<[number, string]> = Array.from({ length: 1 + c.g.int(3) }, () => {
+    const k = c.g.chance(0.5) ? c.g.int(64) : Number(c.g.r() % 4294967296n);
+    return [k, k % 2 === 0 ? "none" : String((k * 3 + 1) >>> 0)];
+  });
+  return { file, decls, c: csrc, js: jssrc, name, ty, show, ctors, calls };
+}
+
+// eff_rows : member i's effect calls, each bound and printed
+function eff_rows(e: Eff, i: number): string[] {
+  return e.calls.flatMap(([k], j) => ["w" + String(i) + "e" + String(j) + " : " + e.ty + " <- " + e.name + "(" + String(k) + ")",
+    "w" + String(i) + "f" + String(j) + " : Unit <- IO.print(" + e.show + "(w" + String(i) + "e" + String(j) + "))"]);
+}
+
 function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
   const withBase = base_seed(seed);
   const c = ctx_new(seed, uid0, withBase, free_name_seed(seed));
@@ -4477,7 +4541,7 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
     return {
       seed, withBase, resultName: "", rawName: "", res: "", lines: [], fold: "", seal: "", extraName: null, xlines: [], xfold: "",
       tail: null, show: { ty: t.k === "tup" ? "(" + ty_str(t) + ")" : ty_str(t), val },
-      entries: c.entries.slice(), feats: Object.keys(c.s.feat), trans: c.trans,
+      entries: c.entries.slice(), feats: Object.keys(c.s.feat), trans: c.trans, eff: null,
     };
   }
   // result: the interp-visible side
@@ -4535,11 +4599,13 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
   c.pure = true;
   // io tail
   const tail = io_ok && seed_roll(seed, 0x17n) < IO_PCT ? io_tail(c.sub("io"), seed) : null;
+  const eff = withBase && seed_roll(seed, 0xe5n) < EFFECT_PCT ? eff_new(c.sub("eff"), seed) : null;
   return {
     seed, withBase, resultName, rawName, res, lines, fold, seal, extraName, xlines, xfold, tail, show: null,
     entries: c.entries.slice(),
     feats: Object.keys(c.s.feat),
     trans: c.trans,
+    eff,
   };
 }
 
@@ -4579,7 +4645,7 @@ function member_drop(m: Member, which: "lines" | "xlines", i: number): Member {
 type Expect = { out: Array<string | null>; err: string[]; code: number };
 
 function member_expect(m: Member, want: string | null): Expect {
-  const out: Array<string | null> = [want];
+  const out: Array<string | null> = [want, ...(m.eff?.calls.map(([, line]) => line) ?? [])];
   const err: string[] = [];
   let code = 0;
   if (m.tail !== null) {
@@ -4603,6 +4669,9 @@ function member_dies(m: Member): boolean {
 // its extra unless it dies (the IO.die is the block's end)
 function member_rows(m: Member, i: number, spelling: Spelling): string[] {
   const rows = ["w" + String(i) + "a : Unit <- IO.print(U32.show(" + (spelling === "raw" ? m.rawName : m.resultName) + "()))"];
+  if (m.eff !== null) {
+    rows.push(...eff_rows(m.eff, i));
+  }
   if (m.tail !== null) {
     rows.push(...m.tail.lines);
   }
@@ -4660,10 +4729,561 @@ function assemble(ms: Member[], spelling: Spelling): string {
   const blocks: string[] = [];
   for (const m of ms) {
     blocks.push(...m.entries);
+    blocks.push(...(m.eff?.decls ?? []));
     blocks.push(...member_defs(m, spelling !== "sealed"));
   }
   blocks.push(member_main(ms, spelling));
   return head + blocks.filter((b) => b !== "").join("\n\n") + "\n";
+}
+
+// Programs on disk
+// ----------------
+// A Prog is what a worker loads: the entry's source, plus files beside it
+// (paths relative to the request's root), symlinks (a path to its target, relative to the link's directory) and
+// files of the hub store (paths relative to BEND_LIB). A flat program with
+// no effect is its source alone; a flat program with effects adds their
+// .c and .js; a module layout names its entry among the files.
+
+type Prog = { src: string; entry?: string; files?: Record<string, string>; links?: Record<string, string>; hub?: Record<string, string> };
+
+// prog_text : the program as one text, for findings and traces
+function prog_text(p: Prog): string {
+  if (p.entry === undefined && p.files === undefined) {
+    return p.src;
+  }
+  const out = [p.entry === undefined ? p.src : "# (a module layout: the entry is " + p.entry + ")\n"];
+  for (const [f, t] of Object.entries(p.files ?? {})) {
+    out.push("#@@ file " + f + "\n" + t);
+  }
+  for (const [f, t] of Object.entries(p.links ?? {})) {
+    out.push("#@@ link " + f + " -> " + t);
+  }
+  for (const [f, t] of Object.entries(p.hub ?? {})) {
+    out.push("#@@ hub " + f + "\n" + t);
+  }
+  return out.join("\n");
+}
+
+// flat : the flat program, its effects' files beside it
+function flat(ms: Member[], spelling: Spelling): Prog {
+  const src = assemble(ms, spelling);
+  const effs = ms.flatMap((m) => m.eff === null ? [] : [m.eff]);
+  if (effs.length === 0) {
+    return { src };
+  }
+  return { src, files: Object.fromEntries(effs.flatMap((e) => [[e.file + ".c", e.c], [e.file + ".js", e.js]])) };
+}
+
+// Modules
+// -------
+// A module layout puts each member in a file of its own, under a path the
+// generator draws, and an entry that imports every one of them under an
+// alias and runs it. Paths: nested directories, hyphens, host and Base
+// spellings, an entry placed below the root so imports climb with ../,
+// spellings with and without ./, a symlinked directory, the hub store
+// (0x<hash>/.., the hash of the module's text). A member imported through a link
+// is sometimes imported twice, through its real path too, under a second
+// alias: one file, one namespace, and both aliases reach it. Names stay the
+// member's own: namespaces keep the members apart, not uids.
+
+const SEG_HEAD = NAME_HEAD;
+const SEG_BODY = NAME_BODY + "-";
+const BASE_PREFIXES = new Set(BASE_DECL_NAMES.filter((n) => n.includes(".")).map((n) => n.slice(0, n.indexOf("."))));
+
+// seg : a path segment a module may take (letters, digits, _ and -, led by
+// a letter or _), a host or Base word a fifth of the time
+function seg(g: Gen): string {
+  if (g.chance(0.2)) {
+    const w = g.pick(NAME_WORDS);
+    if (/^[A-Za-z_][\w-]{0,60}$/.test(w)) {
+      return w;
+    }
+  }
+  const n = g.chance(0.05) ? 30 + g.int(30) : 1 + g.decay(0.6);
+  return g.pick(SEG_HEAD.split("")) + Array.from({ length: n - 1 }, () => g.pick(SEG_BODY.split(""))).join("");
+}
+
+// alias_new : an import's alias, fresh in its file, and no Base prefix (the
+// entry calls Base's IO and U32 through their own names)
+function alias_new(g: Gen, taken: Set<string>): string {
+  for (;;) {
+    const a = g.chance(0.3) ? g.pick(NAME_WORDS) : seg(g).replace(/-/g, "_");
+    if (/^[A-Za-z_]\w*$/.test(a) && a.length <= 40 && !KEYWORDS.includes(a) && !BASE_PREFIXES.has(a) && !taken.has(a)) {
+      taken.add(a);
+      return a;
+    }
+  }
+}
+
+function hex32(x: bigint): string {
+  return rng_mix64(x).toString(16).padStart(16, "0") + rng_mix64(x ^ 0x5eedn).toString(16).padStart(16, "0");
+}
+
+// Mod : one member's module. file: its path from the request root, or from
+// the store for a hub file; spell: how the entry imports it; twice: the
+// second spelling and alias when it is imported twice
+type Mod = { i: number; m: Member; dir: string[]; base: string; hub: string | null; alias: string; spell: string;
+  twice: { alias: string; spell: string } | null; rows: string; text: string; effC: string; effJs: string };
+
+// Layout : a module layout's parts; mutations edit them before serial().
+// entryHead, entryDefs and mainRows are lines a mutation adds to the entry
+type Layout = { entryDir: string[]; entryName: string; mods: Mod[]; links: Record<string, string>;
+  extraFiles: Record<string, string>; extraHub: Record<string, string>; entryHead: string[]; entryDefs: string[];
+  mainRows: string[]; withBase: boolean };
+
+function mod_file(md: Mod): string {
+  return [...md.dir, md.base + ".bend"].join("/");
+}
+
+// modules : the module layout of a group, a function of its members' seeds
+function modules(ms: Member[], spelling: Spelling): Layout {
+  const g = new Gen(rng_mix64(ms[0].seed ^ 0x6d6fn));
+  const used = new Set<string>();
+  const fresh = (p: string): boolean => {
+    const k = p.toLowerCase();
+    if (used.has(k)) {
+      return false;
+    }
+    used.add(k);
+    return true;
+  };
+  const entryDir = g.chance(0.3) ? Array.from({ length: 1 + g.int(2) }, () => seg(g)) : [];
+  entryDir.forEach((_, j) => fresh("d:" + entryDir.slice(0, j + 1).join("/")));
+  const entryName = seg(g);
+  fresh([...entryDir, entryName + ".bend"].join("/"));
+  const aliases = new Set<string>();
+  const links: Record<string, string> = {};
+  const mods: Mod[] = ms.map((m, i) => {
+    const mg = new Gen(rng_mix64(m.seed ^ 0x7061n));
+    const hub = mg.chance(0.15) ? "0x" : null;
+    let dir: string[];
+    let base: string;
+    for (;;) {
+      dir = Array.from({ length: mg.chance(0.5) ? 1 + mg.int(3) : 0 }, () => seg(mg));
+      base = seg(mg);
+      if (hub !== null || (dir.every((_, j) => fresh("d:" + dir.slice(0, j + 1).join("/"))) && fresh([...dir, base + ".bend"].join("/")))) {
+        break;
+      }
+    }
+    const alias = alias_new(mg, aliases);
+    const real = [...dir, base + ".bend"].join("/");
+    let spell: string;
+    let twice: Mod["twice"] = null;
+    if (hub !== null) {
+      spell = "";
+    } else {
+      const rel = path.posix.relative(entryDir.join("/") || ".", real);
+      spell = !rel.startsWith("../") && mg.chance(0.7) ? "./" + rel : rel;
+      if (dir.length > 0 && mg.chance(0.25)) {
+        let link = seg(mg);
+        while (!fresh("d:" + link)) {
+          link = seg(mg);
+        }
+        links[link] = dir.join("/");
+        const via = path.posix.relative(entryDir.join("/") || ".", link + "/" + base + ".bend");
+        const both = m.withBase && m.show === null && !member_dies(m) && mg.chance(0.5);
+        if (both) {
+          twice = { alias: alias_new(mg, aliases), spell };
+        }
+        spell = !via.startsWith("../") ? "./" + via : via;
+      }
+    }
+    return { i, m, dir, base, hub, alias, spell, twice, rows: "", text: "", effC: m.eff?.c ?? "", effJs: m.eff?.js ?? "" };
+  });
+  for (const md of mods) {
+    const m = md.m;
+    const blocks = [...m.entries, ...(m.eff?.decls ?? []), ...member_defs(m, spelling !== "sealed")];
+    const taken = new Set(blocks.flatMap((b) => text_names(b)));
+    md.rows = "fzrows";
+    for (let n = 0; taken.has(md.rows); n++) {
+      md.rows = "fzrows" + String(n);
+    }
+    if (m.withBase && m.show === null) {
+      const end = member_dies(m) ? "IO.die(Unit, " + String((m.tail as IoTail).code) + ", \"fzdie_" + (m.seed & 0xffffffn).toString(16) + "\")"
+        : "IO.pure(Unit, Unit{})";
+      blocks.push("def " + md.rows + "() -> IO(Unit):\n  do IO<Unit>:\n" + member_rows(m, md.i, spelling).concat([end]).map((r) => "    " + r).join("\n"));
+    }
+    md.text = (m.withBase ? "import Base\n\n" : "") + blocks.filter((b) => b !== "").join("\n\n") + "\n";
+  }
+  return { entryDir, entryName, mods, links, extraFiles: {}, extraHub: {}, entryHead: [], entryDefs: [], mainRows: [], withBase: ms[0].withBase };
+}
+
+// module_main : the entry's main over the modules, as member_main is over
+// flat members: every module's rows in order, a twice-imported one's value
+// again through its second alias, and FZ_MEMBER selecting a dying one
+function module_main(l: Layout): string[] {
+  if (!l.withBase || l.mods.some((md) => md.m.show !== null)) {
+    return [];
+  }
+  const block = (name: string, rows: string[]): string =>
+    "def " + name + "() -> IO(Unit):\n  do IO<Unit>:\n" + rows.concat(["IO.pure(Unit, Unit{})"]).map((r) => "    " + r).join("\n");
+  const rowsOf = (md: Mod): string[] => ["w" + String(md.i) + " : Unit <- " + md.alias + "." + md.rows + "()",
+    ...md.twice === null ? [] : ["w" + String(md.i) + "t : Unit <- IO.print(U32.show(" + md.twice.alias + "." + md.m.resultName + "()))"]];
+  const dying = l.mods.filter((md) => member_dies(md.m));
+  const rest = l.mods.filter((md) => !member_dies(md.m)).flatMap(rowsOf).concat(l.mainRows);
+  if (dying.length === 0) {
+    return [block("main", rest)];
+  }
+  const RES = "Result<&1, &1, U32 & String, String>";
+  const sel = (j: number): string => "fzsel" + String(j) + "(String.eq(s, \"" + String(dying[j].i) + "\"), s)";
+  const defs = [block("fzall", rest)];
+  for (const md of dying) {
+    defs.push(block("fzm" + String(md.i), rowsOf(md)));
+  }
+  for (let j = dying.length - 1; j >= 0; j--) {
+    defs.push("def fzsel" + String(j) + "(z: Bool, +s: String) -> IO(Unit):\n  match z:\n    case True{}:\n      fzm" + String(dying[j].i)
+      + "()\n    case False{}:\n      " + (j + 1 < dying.length ? sel(j + 1) : "fzall()"));
+  }
+  defs.push("def fzdis(r: " + RES + ") -> IO(Unit):\n  match r:\n    case Done{s0}:\n      +s = s0\n      " + sel(0)
+    + "\n    case Fail{e}:\n      fzall()");
+  defs.push("def main() -> IO(Unit):\n  do IO<Unit>:\n    sel : " + RES + " <- IO.get_env(\"FZ_MEMBER\")\n    fzdis(sel)");
+  return defs;
+}
+
+// serial : the layout as a Prog. A hub module's package is named after its
+// final text (a mutation's included): the store keeps what it once took
+function serial(l: Layout): Prog {
+  for (const md of l.mods) {
+    if (md.hub !== null) {
+      md.hub = "0x" + hex32(str_hash(md.text + "\0" + md.effC + "\0" + md.effJs));
+      md.spell = md.hub + "/" + mod_file(md);
+    }
+  }
+  const entry = [...l.entryDir, l.entryName + ".bend"].join("/");
+  const files: Record<string, string> = { ...l.extraFiles };
+  const hub: Record<string, string> = { ...l.extraHub };
+  for (const md of l.mods) {
+    const at = md.hub === null ? files : hub;
+    const root = md.hub === null ? "" : md.hub + "/";
+    at[root + mod_file(md)] = md.text;
+    if (md.m.eff !== null) {
+      const d = [...md.dir, md.m.eff.file].join("/");
+      at[root + d + ".c"] = md.effC;
+      at[root + d + ".js"] = md.effJs;
+    }
+  }
+  const imports = l.mods.flatMap((md) => ["import " + md.spell + " as " + md.alias,
+    ...md.twice === null ? [] : ["import " + md.twice.spell + " as " + md.twice.alias]]);
+  // a mutation names a module's spelling, known here, as @SPELL<i>@
+  const head = l.entryHead.map((h) => h.replace(/@SPELL(\d+)@/g, (_, i) => l.mods[Number(i)].spell));
+  files[entry] = (l.withBase ? "import Base\n" : "") + [...imports, ...head].join("\n") + "\n\n"
+    + [...l.entryDefs, ...module_main(l)].join("\n\n") + "\n";
+  return { src: "", entry, files, links: l.links, hub };
+}
+
+// mod_key : how a worker names a module's def: its file and the def
+function mod_key(md: Mod, name: string): string {
+  return (md.hub === null ? "" : "@lib/" + md.hub + "/") + mod_file(md) + "::" + name;
+}
+
+// module_seed : a member laid out as a module (not a show member, whose
+// main is its own)
+function module_seed(seed: bigint): boolean {
+  return !show_seed(seed) && seed_roll(seed, 0x4dn) < MODULE_PCT;
+}
+
+// prog_of : a group's program in its layout, the layout too (a group is one
+// layout: batches never mix them); key names a member's def to the worker
+function prog_of(ms: Member[], spelling: Spelling): { p: Prog; l: Layout | null; key: (i: number, n: string) => string } {
+  if (!module_seed(ms[0].seed)) {
+    return { p: flat(ms, spelling), l: null, key: (_, n) => n };
+  }
+  const l = modules(ms, spelling);
+  return { p: serial(l), l, key: (i, n) => mod_key(l.mods[i], n) };
+}
+
+// Clashes
+// -------
+// A clash seed also takes its member's module layout (whatever layout its
+// positive run used) and mutates it with ONE clash from a catalog, each a
+// way two names, paths or registrations could come to mean one thing. The
+// mutated program must fail loudly, at the stage and with the error the
+// clash names: accepted is `clash-accepted`, refused otherwise
+// `clash-other`, an internal error `clash-crash`. The catalog, each drawn
+// over the member's own names, paths and effect:
+//   base-redecl      a module declares a def, type or constructor of Base's
+//   root-redecl      the entry declares a key a module declares
+//   alias-dup        two imports under one alias (one file or two)
+//   alias-shadow     an alias named like a Base prefix P, the module
+//                    declaring x, and the entry naming P.x
+//   alias-decl       the entry declares a name under an import's alias
+//   bad-path         a path segment of a forbidden form: a dot, a ~, a
+//                    digit or 0x lead, any other character
+//   inner-dotdot     a .. inside an import's path
+//   link-bad-target  an import through a link to a badly named directory
+//   hub-escape       a hub file importing outside its package
+//   bad-name         a declared name with an empty or digit-led segment
+//   cid-unknown      an effect's CID(..) of no constructor or def
+//   effect-ctr-name  a foreign def named like a constructor
+//   effect-two-ns    one effect source imported from two namespaces
+//   effect-dup-reg   an effect registered twice: the C and JS runs fail
+
+type Clash = { kind: string; mode: "check" | "emit" | "run"; want: RegExp };
+
+const BASE_DECLS = (() => {
+  const out = { defs: new Set<string>(), types: new Set<string>(), ctors: new Set<string>() };
+  for (const mm of BASE_SOURCE.matchAll(/^(def|law|type)\s+([A-Za-z_][\w.]*)|^  ([A-Za-z_][\w.]*)\{/gm)) {
+    (mm[3] !== undefined ? out.ctors : mm[1] === "type" ? out.types : out.defs).add(mm[3] ?? mm[2]);
+  }
+  return { defs: [...out.defs], types: [...out.types], ctors: [...out.ctors] };
+})();
+
+const PATH_ERR = /an import path of plain names|an import \('import Base'|a package as <name>@<version>/;
+
+function re_lit(t: string): string {
+  return t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// bad_seg : a path segment of a form the loader must refuse
+function bad_seg(g: Gen): string {
+  const good = seg(g).replace(/-/g, "_");
+  return g.wpick<() => string>([
+    [4, () => good + "." + seg(g)],
+    [1, () => good + "."],
+    [3, () => good + "~" + seg(g)],
+    [3, () => String(g.int(10)) + good],
+    [2, () => "0x" + hex32(g.r()).slice(0, 8 + g.int(24))],
+    [4, () => good + g.pick([..."!$%&'()*+,:;<=>?[]^`{|}é中ß"]) + seg(g)],
+    [1, () => good + " " + seg(g)],
+    [1, () => good + "@" + seg(g)],
+  ])();
+}
+
+// clash_new : one clash on the member's layout, or null when none applies
+function clash_new(g: Gen, l: Layout): Clash | null {
+  const md = l.mods[0];
+  const m = md.m;
+  const fresh = "fzq" + (m.seed & 0xffffffn).toString(16);
+  const names = new Set(text_names(md.text));
+  const kinds: Array<[number, () => Clash | null]> = [
+    [3, () => {
+      if (!m.withBase) {
+        return null;
+      }
+      const which = g.int(3);
+      const pool = [BASE_DECLS.defs, BASE_DECLS.types, BASE_DECLS.ctors][which];
+      const n = g.pick(pool);
+      md.text += which === 0 ? "\ndef " + n + "() -> U32:\n  0\n"
+        : which === 1 ? "\ntype " + n + " is Data:\n  " + fresh + "K{}\n"
+        : "\ntype " + fresh + "T is Data:\n  " + n + "{}\n";
+      return { kind: "base-redecl", mode: "check", want: new RegExp("a fresh " + (which === 2 ? "constructor " : "") + "name \\(duplicate declaration: " + re_lit(n) + "\\)") };
+    }],
+    [2, () => {
+      if (md.hub !== null || md.dir.length > 0 || l.entryDir.length > 0 || !/^[A-Za-z_]\w*$/.test(md.base) || m.show !== null || m.resultName === "") {
+        return null;
+      }
+      l.entryDefs.push("def " + md.base + "." + m.resultName + "() -> U32:\n  0");
+      return { kind: "root-redecl", mode: "check", want: /duplicate declaration|is an import's alias/ };
+    }],
+    [2, () => {
+      if (g.chance(0.5)) {
+        l.entryHead.push("import @SPELL" + String(md.i) + "@ as " + md.alias);
+      } else {
+        const other = seg(g) + "_" + fresh;
+        l.extraFiles[other + ".bend"] = "def " + fresh + "() -> " + (m.withBase ? "U32:\n  0\n" : "Type:\n  Type\n");
+        l.entryHead.push("import " + path.posix.relative(l.entryDir.join("/") || ".", other + ".bend") + " as " + md.alias);
+      }
+      return { kind: "alias-dup", mode: "check", want: /a fresh alias/ };
+    }],
+    [3, () => {
+      if (!m.withBase) {
+        return null;
+      }
+      const opts = BASE_DECLS.defs.filter((n) => {
+        const d = n.indexOf(".");
+        return d > 0 && /^[A-Za-z_]\w*$/.test(n.slice(0, d)) && !BASE_NAMES.has(n.slice(d + 1)) && !names.has(n.slice(d + 1))
+          && l.mods.every((o) => o === md || o.alias !== n.slice(0, d));
+      });
+      if (opts.length === 0) {
+        return null;
+      }
+      const n = g.pick(opts);
+      const p = n.slice(0, n.indexOf("."));
+      md.text += "\ndef " + n.slice(p.length + 1) + "() -> U32:\n  0\n";
+      md.alias = p;
+      l.entryDefs.push("def " + fresh + "() -> U32:\n  " + n);
+      return { kind: "alias-shadow", mode: "check", want: new RegExp("an unambiguous name \\(the alias " + re_lit(p) + " shadows ") };
+    }],
+    [2, () => {
+      l.entryDefs.push("def " + md.alias + "." + fresh + "() -> " + (m.withBase ? "U32:\n  0" : "Type:\n  Type"));
+      return { kind: "alias-decl", mode: "check", want: new RegExp(re_lit(md.alias) + " is an import's alias") };
+    }],
+    [4, () => {
+      const bad = bad_seg(g);
+      const at = g.int(md.dir.length + 1);
+      if (at < md.dir.length) {
+        md.dir[at] = bad;
+      } else {
+        md.base = bad;
+      }
+      md.spell = "./" + path.posix.relative(l.entryDir.join("/") || ".", mod_file(md));
+      md.twice = null;
+      return { kind: "bad-path", mode: "check", want: PATH_ERR };
+    }],
+    [2, () => {
+      if (md.hub !== null || md.dir.length === 0) {
+        return null;
+      }
+      const up = path.posix.relative(l.entryDir.join("/") || ".", md.dir[0]);
+      md.spell = up + "/../" + mod_file(md);
+      md.twice = null;
+      return { kind: "inner-dotdot", mode: "check", want: PATH_ERR };
+    }],
+    [2, () => {
+      if (md.hub !== null) {
+        return null;
+      }
+      md.dir = [bad_seg(g).replace(/[ @]/g, ".")];
+      const tops = new Set([md.dir[0], l.entryDir[0] ?? "", l.entryName + ".bend", ...Object.keys(l.links), ...Object.keys(l.extraFiles)]
+        .map((t) => t.split("/")[0].toLowerCase()));
+      let link = seg(g);
+      while (tops.has(link.toLowerCase())) {
+        link = seg(g);
+      }
+      l.links[link] = md.dir[0];
+      md.spell = "./" + path.posix.relative(l.entryDir.join("/") || ".", link + "/" + md.base + ".bend");
+      md.twice = null;
+      return { kind: "link-bad-target", mode: "check", want: PATH_ERR };
+    }],
+    [2, () => {
+      const out = seg(g).replace(/-/g, "_") + "_" + fresh;
+      const esc = "import ../" + out + ".bend as Q\n\ndef " + fresh + "() -> " + (m.withBase ? "U32:\n  0\n" : "Type:\n  Type\n");
+      const pkg = "0x" + hex32(str_hash(esc + out));
+      l.extraHub[pkg + "/esc.bend"] = esc;
+      l.extraHub[out + ".bend"] = "def " + fresh + "() -> " + (m.withBase ? "U32:\n  0\n" : "Type:\n  Type\n");
+      l.entryHead.push("import " + pkg + "/esc.bend as " + fresh + "E");
+      return { kind: "hub-escape", mode: "check", want: PATH_ERR };
+    }],
+    [3, () => {
+      const decls = [...md.text.matchAll(/^(?:def|law|type)\s+([A-Za-z_][\w.]*)|^  ([A-Za-z_][\w.]*)\{/gm)];
+      if (decls.length === 0) {
+        return null;
+      }
+      const d = g.pick(decls);
+      const n = d[1] ?? d[2];
+      const bad = g.pick([n + "." + String(g.int(10)) + seg(g).replace(/-/g, "_"), n + "..x", n + "." + String(g.int(100))]);
+      const at = (d.index as number) + d[0].lastIndexOf(n);
+      md.text = md.text.slice(0, at) + bad + md.text.slice(at + n.length);
+      return { kind: "bad-name", mode: "check", want: /a name \(words joined by dots, got / };
+    }],
+    [2, () => {
+      if (m.eff === null) {
+        return null;
+      }
+      const k = g.pick(m.eff.ctors);
+      const unknown = fresh + "U";
+      if (g.chance(0.5)) {
+        md.effC = md.effC.replace("CID(" + k + ")", "CID(" + unknown + ")");
+      } else {
+        md.effJs = md.effJs.replace("CID(" + k + ")", "CID(" + unknown + ")");
+      }
+      return { kind: "cid-unknown", mode: "emit", want: new RegExp("CID\\(" + unknown + "\\) names no constructor or def") };
+    }],
+    [2, () => {
+      if (m.eff === null) {
+        return null;
+      }
+      const k = g.pick(m.eff.ctors);
+      md.text += "\ndef " + k + "() -> IO(U32):\n  import \"./" + m.eff.file + ".c\"\n  import \"./" + m.eff.file + ".js\"\n";
+      return { kind: "effect-ctr-name", mode: "emit", want: new RegExp(re_lit(k) + " names both a constructor and a foreign def") };
+    }],
+    [2, () => {
+      if (m.eff === null || md.hub !== null || l.mods.some((o) => member_dies(o.m))) {
+        return null;
+      }
+      const dir2 = seg(g).replace(/-/g, "_") + "_" + fresh;
+      const eff = [...md.dir, m.eff.file].join("/");
+      const rel = path.posix.relative(dir2, eff);
+      l.extraFiles[dir2 + "/m.bend"] = "import Base\n\ndef " + fresh + "(n: U32) -> IO(U32):\n  import \"" + rel + ".c\"\n  import \""
+        + rel + ".js\"\n\ndef " + md.rows + "() -> IO(Unit):\n  do IO<Unit>:\n    z : U32 <- " + fresh + "(1)\n    IO.pure(Unit, Unit{})\n";
+      l.entryHead.push("import " + path.posix.relative(l.entryDir.join("/") || ".", dir2 + "/m.bend") + " as " + fresh + "M");
+      l.mainRows.push("wz : Unit <- " + fresh + "M." + md.rows + "()");
+      return { kind: "effect-two-ns", mode: "emit", want: /is imported from two namespaces/ };
+    }],
+    [2, () => {
+      if (m.eff === null) {
+        return null;
+      }
+      md.effC += "\nstatic void __attribute__((constructor)) " + m.eff.file + "_use2(void) {\n  io_eff(CID(" + m.eff.name + "), " + m.eff.file + "_run, 0);\n}\n";
+      md.effJs += "\nio_eff(CID(" + m.eff.name + "), " + m.eff.file + ");\n";
+      return { kind: "effect-dup-reg", mode: "run", want: /two effects register/ };
+    }],
+  ];
+  const order = kinds.slice();
+  while (order.length > 0) {
+    const pick = g.wpick(order.map((k, i) => [k[0], i] as [number, number]));
+    const got = order[pick][1]();
+    if (got !== null) {
+      return got;
+    }
+    order.splice(pick, 1);
+  }
+  return null;
+}
+
+function clash_seed(seed: bigint): boolean {
+  return !show_seed(seed) && seed_roll(seed, 0xc1n) < CLASH_PCT;
+}
+
+// clash_test : the member's clash, run to its failure
+async function clash_test(m: Member): Promise<Verdict | null> {
+  const l = modules([m], "sealed");
+  const c = clash_new(new Gen(rng_mix64(m.seed ^ 0xc1a5n)), l);
+  if (c === null) {
+    return null;
+  }
+  feat_tally["clash-" + c.kind] = (feat_tally["clash-" + c.kind] ?? 0) + 1;
+  const p = serial(l);
+  const text = prog_text(p);
+  const w = await phase("worker:clash", () => pool.run(p, c.mode === "check" ? "check" : "emit"));
+  const found = (kind: string, why: string): Verdict => {
+    save_finding(m.seed, kind, ["clash=" + c.kind, "want=" + String(c.want), why], text, c.kind + ": " + why.split("\n")[0]);
+    return { kind: "fail", fkind: kind, why };
+  };
+  if (w.verdict === "skip") {
+    return { kind: "skip", note: "clash-" + (w.stage ?? "?") };
+  }
+  const err = w.err ?? "";
+  if (c.mode !== "run") {
+    if (w.verdict === "ok") {
+      return found("clash-accepted", "the " + c.mode + " stage accepted it");
+    }
+    if (!c.want.test(err)) {
+      return found(w.verdict === "crash" && c.mode === "check" ? "clash-crash" : "clash-other", err);
+    }
+    return null;
+  }
+  if (w.verdict !== "ok") {
+    return found("clash-other", err);
+  }
+  if (CHECK_ONLY) {
+    return null;
+  }
+  const dir = fs.mkdtempSync(path.join(TMP, "c-"));
+  try {
+    const base = "fzc" + String(m.seed);
+    const cc = await leg_cc(dir, base, w.csrc ?? "", [], base, CC_TIMEOUT);
+    if (cc.skip === true) {
+      return { kind: "skip", note: "clash-cc-timeout" };
+    }
+    if (!cc.ok) {
+      return found("clash-other", cc.why ?? "cc failed");
+    }
+    const crun = await leg_run(path.join(dir, base), ["--threads", "1", "--gpu", "off"], dir, RUN_TIMEOUT);
+    const jsf = path.join(dir, base + ".js");
+    fs.writeFileSync(jsf, w.jssrc ?? "");
+    const jrun = await leg_run(process.execPath, [jsf], dir, RUN_TIMEOUT);
+    for (const [lane, r] of [["C", crun], ["JS", jrun]] as const) {
+      if (r.code === 0 || !c.want.test(r.err)) {
+        return found(r.code === 0 ? "clash-accepted" : "clash-other", lane + " exit " + String(r.code) + ": " + (r.err || r.out).slice(0, 500));
+      }
+    }
+  } finally {
+    if (!KEEP) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  return null;
 }
 
 // Worker
@@ -4677,7 +5297,7 @@ function assemble(ms: Member[], spelling: Spelling): string {
 // on a checked program — a finding), ok.
 
 type WorkerMode = "interp" | "show" | "emit" | "check";
-type WorkerReq = { id: number; src: string; mode: WorkerMode; defs?: string[] };
+type WorkerReq = { id: number; src: string; mode: WorkerMode; defs?: string[]; prog?: Prog };
 type WorkerRes = {
   id: number;
   verdict: "ok" | "reject" | "skip" | "crash";
@@ -4734,11 +5354,39 @@ async function worker_main(): Promise<void> {
     }
     return base_book;
   };
+  // prog_dir : a program's files on disk, in a fresh directory under the
+  // run's temporary root; the hub store's files under BEND_LIB, once
+  const prog_dir = (p: Prog): string => {
+    const dir = fs.mkdtempSync(path.join(process.env.FZ_TMP ?? os.tmpdir(), "w-"));
+    for (const [f, t] of Object.entries(p.files ?? {})) {
+      fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+      fs.writeFileSync(path.join(dir, f), t);
+    }
+    for (const [f, t] of Object.entries(p.links ?? {})) {
+      fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+      fs.symlinkSync(t, path.join(dir, f));
+    }
+    for (const [f, t] of Object.entries(p.hub ?? {})) {
+      const at = path.join(process.env.BEND_LIB as string, f);
+      if (!fs.existsSync(at)) {
+        fs.mkdirSync(path.dirname(at), { recursive: true });
+        fs.writeFileSync(at + ".part" + String(process.pid), t);
+        fs.renameSync(at + ".part" + String(process.pid), at);
+      }
+    }
+    return dir;
+  };
   // book_of: Base is an input environment. A book without `import Base`
   // starts empty, so those names remain available to ordinary generation.
-  const book_of = async (src: string): Promise<{ book?: unknown; err?: string; range?: unknown }> => {
+  // A program with files loads from its directory: a module layout through
+  // book_load, as `bend` does, seen mapping each file to its namespace
+  const book_of = async (src: string, p?: Prog, dir?: string, seen?: Map<string, string | null>): Promise<{ book?: unknown; err?: string; range?: unknown }> => {
     const book = bend.book_nil();
     try {
+      const entry = p?.entry === undefined ? null : path.join(dir as string, p.entry);
+      if (entry !== null) {
+        src = fs.readFileSync(entry, "utf8");
+      }
       const usesBase = /^import Base$/m.test(src);
       let baseCount = 0;
       if (usesBase) {
@@ -4756,7 +5404,12 @@ async function worker_main(): Promise<void> {
         book.order.push(...base.order);
         baseCount = base.order.length;
       }
-      bend.parse_book(book, ROOT + "/", src.replace(/^import Base$/m, ""), "");
+      if (entry !== null) {
+        (seen as Map<string, string | null>).set(BASE_PATH, "");
+        await bend.book_load(book, entry, "", seen);
+      } else {
+        bend.parse_book(book, (dir ?? ROOT) + "/", src.replace(/^import Base$/m, ""), "");
+      }
       bend.book_valid(book, baseCount);
       return { book };
     } catch (e) {
@@ -4787,12 +5440,40 @@ async function worker_main(): Promise<void> {
       });
     };
     let checked: { book?: unknown; err?: string; range?: unknown };
+    const dir = req.prog?.files === undefined ? undefined : prog_dir(req.prog);
+    const seen = new Map<string, string | null>();
+    const done = (): void => {
+      if (dir !== undefined) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // a def a module declares is named by its file: "file::def" is the def's
+    // key in the namespace the loader gave that file
+    const key = (d: string): string => {
+      const at = d.indexOf("::");
+      if (at < 0) {
+        return d;
+      }
+      const f = d.slice(0, at);
+      const real = fs.realpathSync(f.startsWith("@lib/") ? path.join(process.env.BEND_LIB as string, f.slice(5)) : path.join(dir as string, f));
+      const ns = seen.get(real) ?? "";
+      return ns === "" ? d.slice(at + 2) : ns + "." + d.slice(at + 2);
+    };
     try {
-      checked = await book_of(req.src);
+      checked = await book_of(req.src, req.prog, dir, seen);
     } catch (e) {
+      done();
       reply({ id: req.id, verdict: "crash", stage: "check", err: err_str(e) });
       return;
     }
+    try {
+      await handle_book(req, checked, key, reply, range);
+    } finally {
+      done();
+    }
+  };
+  const handle_book = async (req: WorkerReq, checked: { book?: unknown; err?: string; range?: unknown }, key: (d: string) => string,
+    reply: (r: WorkerRes) => void, range: (stage: string, e: unknown, def?: string) => void): Promise<void> => {
     if (checked.range !== undefined) {
       range("check", checked.range);
       return;
@@ -4812,7 +5493,7 @@ async function worker_main(): Promise<void> {
       for (const def of req.defs ?? []) {
         let shown: string;
         try {
-          shown = bend.term_show(bend.term_lower(bend.term_snf(book, bend.Ref(def))));
+          shown = bend.term_show(bend.term_lower(bend.term_snf(book, bend.Ref(key(def)))));
         } catch (e) {
           if (e instanceof RangeError) {
             range("interp", e, def);
@@ -4875,9 +5556,12 @@ class Pool {
   }
 
   spawn(): Slot {
+    // BEND_LIB: the run's own hub store (a module layout's hub files land
+    // there), BEND_HUB unreachable: a program never fetches
     const proc = child.spawn(process.execPath, [import.meta.filename, "--worker"], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: ROOT,
+      env: { ...process.env, FZ_TMP: TMP, BEND_LIB: path.join(TMP, "lib"), BEND_HUB: "http://127.0.0.1:9" },
     });
     const slot: Slot = { proc, busy: false, reqId: null, expired: false, errbuf: "", served: 0 };
     proc.stdin?.on("error", () => {});
@@ -4951,13 +5635,15 @@ class Pool {
     }, WORKER_TIMEOUT);
     this.pending.set(req.id, { resolve, timer });
     if (process.env.FUZZ_TRACE_DIR !== undefined) {
-      fs.writeFileSync(path.join(process.env.FUZZ_TRACE_DIR, String(req.id).padStart(6, "0") + "-" + req.mode + ".bend"), req.src);
+      fs.writeFileSync(path.join(process.env.FUZZ_TRACE_DIR, String(req.id).padStart(6, "0") + "-" + req.mode + ".bend"), req.prog === undefined ? req.src : prog_text(req.prog));
     }
     w.proc.stdin?.write(JSON.stringify(req) + "\n");
   }
 
-  async run(src: string, mode: WorkerMode, defs?: string[], retry = true): Promise<WorkerRes> {
-    const req: WorkerReq = { id: this.nextId++, src, mode, defs };
+  async run(src: string | Prog, mode: WorkerMode, defs?: string[], retry = true): Promise<WorkerRes> {
+    const req: WorkerReq = typeof src === "string" ? { id: this.nextId++, src, mode, defs }
+      : src.files === undefined ? { id: this.nextId++, src: src.src, mode, defs }
+      : { id: this.nextId++, src: src.src, mode, defs, prog: src };
     const res = await new Promise<WorkerRes>((resolve) => {
       this.queue.push({ req, resolve });
       this.drain();
@@ -5115,7 +5801,10 @@ function save_file(sub: string, seed: bigint, header: string[], src: string, suf
 // repro line, and announce it; head is the one-line summary printed
 function repro_line(seed: bigint): string {
   const flags = (THREADS > 0 ? " --threads " + String(THREADS) : "")
-    + (WITH_METAL ? " --metal" : "") + (WITH_CUDA ? " --cuda" : "");
+    + (WITH_METAL ? " --metal" : "") + (WITH_CUDA ? " --cuda" : "")
+    + (MODULE_PCT !== 25 ? " --module-pct " + String(MODULE_PCT) : "")
+    + (EFFECT_PCT !== 25 ? " --effect-pct " + String(EFFECT_PCT) : "")
+    + (CLASH_PCT !== 15 ? " --clash-pct " + String(CLASH_PCT) : "");
   return "repro: bun " + import.meta.filename + " 1 --seed " + String(seed) + flags;
 }
 
@@ -5175,7 +5864,7 @@ async function member_interp(ms: MemberState): Promise<void> {
   const m = ms.m;
   if (m.show !== null) {
     const src = assemble([m], "sealed");
-    const w = await phase("worker:show", () => pool.run(src, "show", ["main"]));
+    const w = await phase("worker:show", () => pool.run(flat([m], "sealed"), "show", ["main"]));
     if (w.verdict === "reject" || w.verdict === "crash") {
       const kind = w.verdict === "reject" ? "raw-reject" : "raw-crash";
       const error = w.err ?? "";
@@ -5191,18 +5880,20 @@ async function member_interp(ms: MemberState): Promise<void> {
     ms.want = (w.outs?.[0] ?? "").trim();
     return;
   }
-  const src = assemble([m], "both");
+  const both = prog_of([m], "both");
+  const src = prog_text(both.p);
   const [oracle, w] = await Promise.all([
-    phase("worker:raw", () => pool.run(src, "interp", [m.rawName])),
-    phase("worker:sealed", () => pool.run(src, "interp", [m.resultName])),
+    phase("worker:raw", () => pool.run(both.p, "interp", [both.key(0, m.rawName)])),
+    phase("worker:sealed", () => pool.run(both.p, "interp", [both.key(0, m.resultName)])),
   ]);
   const fail = (kind: string, detail: string[], prog: string, head: string, why = head): void => {
     save_finding(m.seed, kind, detail, prog, head);
     ms.verdict = { kind: "fail", fkind: kind, why };
   };
   if (oracle.verdict === "reject") {
-    const raw = assemble([m], "raw");
-    const r = await phase("worker:check", () => pool.run(raw, "check"));
+    const rawp = prog_of([m], "raw").p;
+    const raw = prog_text(rawp);
+    const r = await phase("worker:check", () => pool.run(rawp, "check"));
     const kind = r.verdict === "ok" ? "generator-reject" : "raw-reject";
     const error = oracle.err ?? "";
     fail(kind, ["stage=check", error], kind === "raw-reject" ? raw : src, failure_head(error), error);
@@ -5235,8 +5926,8 @@ async function member_interp(ms: MemberState): Promise<void> {
 // one run per dying member selected by FZ_MEMBER.
 type RunSpec = { label: string; env: Env; exp: Expect; transLines: number[] };
 
-function group_runs(states: MemberState[]): RunSpec[] {
-  const plain = group_expect(states.filter((s) => !member_dies(s.m)));
+function group_runs(states: MemberState[], twice: Set<Member> = new Set()): RunSpec[] {
+  const plain = group_expect(states.filter((s) => !member_dies(s.m)), twice);
   const runs: RunSpec[] = [{ label: "", env: undefined, ...plain }];
   states.forEach((s, i) => {
     if (member_dies(s.m)) {
@@ -5246,7 +5937,7 @@ function group_runs(states: MemberState[]): RunSpec[] {
   return runs;
 }
 
-function group_expect(states: MemberState[]): { exp: Expect; transLines: number[] } {
+function group_expect(states: MemberState[], twice: Set<Member> = new Set()): { exp: Expect; transLines: number[] } {
   const out: Array<string | null> = [];
   const err: string[] = [];
   const transLines: number[] = [];
@@ -5259,6 +5950,9 @@ function group_expect(states: MemberState[]): { exp: Expect; transLines: number[
       }
     }
     out.push(...e.out);
+    if (twice.has(ms.m)) {
+      out.push(ms.want);
+    }
     err.push(...e.err);
     code = e.code;
   }
@@ -5277,8 +5971,9 @@ async function group_compiled(states: MemberState[], solo: boolean): Promise<{ f
     return { fail: null, skip: null, ulp: false };
   }
   const members = live.map((s) => s.m);
-  const src = assemble(members, "sealed");
-  const w = await phase("worker:emit", () => pool.run(src, "emit"));
+  const prog = prog_of(members, "sealed");
+  const src = prog_text(prog.p);
+  const w = await phase("worker:emit", () => pool.run(prog.p, "emit"));
   if (w.verdict === "skip") {
     return { fail: null, skip: w.stage ?? "emit-skip", err: w.err, batch: src, ulp: false };
   }
@@ -5288,7 +5983,7 @@ async function group_compiled(states: MemberState[], solo: boolean): Promise<{ f
   if (CHECK_ONLY) {
     return { fail: null, skip: null, ulp: false };
   }
-  const runs = group_runs(live);
+  const runs = group_runs(live, new Set((prog.l?.mods ?? []).filter((md) => md.twice !== null).map((md) => md.m)));
   const base = "fz" + String(members[0].seed) + (solo ? "s" : "b");
   const dir = fs.mkdtempSync(path.join(TMP, "g-"));
   const fail = (why: string): { fail: string; skip: null; ulp: boolean } => ({ fail: why, skip: null, ulp: false });
@@ -5416,8 +6111,8 @@ async function test_members(states: MemberState[], solo: boolean): Promise<Verdi
   if (res.skip !== null) {
     for (const s of grouped) {
       if (s.verdict === null) {
-        save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip, res.err ?? ""], assemble([s.m], "sealed"));
-        if (res.batch !== undefined && res.batch !== assemble([s.m], "sealed")) {
+        save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip, res.err ?? ""], prog_text(prog_of([s.m], "sealed").p));
+        if (res.batch !== undefined && res.batch !== prog_text(prog_of([s.m], "sealed").p)) {
           save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip + " (the batch that skipped)", res.err ?? ""], res.batch, "-batch");
         }
         s.verdict = { kind: "skip", note: res.skip };
@@ -5428,7 +6123,7 @@ async function test_members(states: MemberState[], solo: boolean): Promise<Verdi
     const kind = res.fail.startsWith("EMIT") ? "compiler-crash"
       : /COMPILE FAILURE/.test(res.fail) ? "cc-fail"
       : /TIMEOUT/.test(res.fail) ? "leg-timeout" : "leg-diverge";
-    save_finding(s.m.seed, kind, [res.fail], assemble([s.m], "sealed"), res.fail.split("\n")[0]);
+    save_finding(s.m.seed, kind, [res.fail], prog_text(prog_of([s.m], "sealed").p), res.fail.split("\n")[0]);
     s.verdict = { kind: "fail", fkind: kind, why: res.fail };
   } else if (res.fail !== null) {
     // attribute: re-run each member alone at uid base 0, so whatever it
@@ -5448,7 +6143,7 @@ async function test_members(states: MemberState[], solo: boolean): Promise<Verdi
     if (!blamed) {
       save_finding(grouped[0].m.seed, "batch-only",
         ["no member fails alone — the MERGE or whole-book emission is at fault", res.fail,
-          "members: " + grouped.map((s) => String(s.m.seed)).join(" ")], assemble(grouped.map((s) => s.m), "sealed"),
+          "members: " + grouped.map((s) => String(s.m.seed)).join(" ")], prog_text(prog_of(grouped.map((s) => s.m), "sealed").p),
         String(grouped.length) + " members: " + res.fail.split("\n")[0]);
       grouped[0].verdict = { kind: "fail", fkind: "batch-only", why: res.fail };
     }
@@ -5458,6 +6153,11 @@ async function test_members(states: MemberState[], solo: boolean): Promise<Verdi
       if (s.verdict === null && s.m.trans) {
         s.verdict = { kind: "skip", note: "trans-ulp" };
       }
+    }
+  }
+  for (const s of states) {
+    if (s.verdict === null && clash_seed(s.m.seed)) {
+      s.verdict = await clash_test(s.m);
     }
   }
   for (const s of states) {
@@ -5533,7 +6233,7 @@ async function reduce_run(seed: bigint): Promise<void> {
   }
   QUIET = false;
   const f = save_file("", seed, ["FUZZ REDUCED kind=" + want, repro_line(seed),
-    "reduced by --reduce: the same failure on this program"], assemble([m], "sealed"), ".min");
+    "reduced by --reduce: the same failure on this program"], prog_text(prog_of([m], "sealed").p), ".min");
   console.log("-> " + f);
 }
 
@@ -5543,7 +6243,7 @@ async function reduce_run(seed: bigint): Promise<void> {
 async function fuzz_run(): Promise<void> {
   if (cli_flag("--dump") || cli_flag("--dump-raw")) {
     const m = gen_member(BASE_SEED, 0);
-    process.stdout.write(assemble([m], cli_flag("--dump-raw") ? "raw" : "sealed"));
+    process.stdout.write(prog_text(prog_of([m], cli_flag("--dump-raw") ? "raw" : "sealed").p));
     return;
   }
   fs.mkdirSync(FINDINGS, { recursive: true });
@@ -5601,6 +6301,9 @@ async function fuzz_run(): Promise<void> {
         // A pure-main book, an empty initial environment, or unrestricted
         // top-level names owns its whole book. Close the current batch first.
         if (standalone_seed(next) && batch.length > 0) {
+          break;
+        }
+        if (batch.length > 0 && module_seed(next) !== module_seed(batch[0])) {
           break;
         }
         batch.push(next);
