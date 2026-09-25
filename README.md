@@ -5,58 +5,49 @@ toolchain (`bend2/bend.ts` + `bend2/comp.ts`). Each seed deterministically
 generates a well-typed, terminating Bend program in two algebraically-equal
 spellings (raw and identity-sealed) and cross-checks every leg:
 
-- **interp** (the spec): `term_snf` on the pure `result` def, raw and
-  sealed — both spellings sit in one book, evaluated in parallel — the
-  trusted-kernel path. The raw value is the oracle. The interpreter runs base's structural
-  Word code, so this leg is also a bit-level spec differential against the
-  native ops the backends substitute.
-- **C** (`compile_book`): one standalone `.c` built with clang, run
-  sequentially (`--threads 1 --gpu off`); optional lanes on top: CPU parallelism
-  (`--threads N`), Metal (`--metal`, macOS) and CUDA (`--cuda`, Linux +
-  NVIDIA), both run `--gpu on`.
+- **interp** (the spec): `term_snf` on the program's result defs, raw and
+  sealed, or on a pure `main`, printed by `term_show`. The raw value is the
+  oracle. The interpreter runs base's structural Word code, so this leg is
+  also a bit-level spec differential against the native ops the backends
+  substitute. A book without Base has this leg only.
+- **C** (`compile_book`): one standalone `.c` built with clang at the
+  group's drawn `-O` level, run sequentially (`--threads 1 --gpu off`) and
+  in parallel at the group's drawn thread count; with `--metal` (macOS) or
+  `--cuda` (Linux + NVIDIA) the same `.c` is rebuilt for the device and run
+  `--gpu on`.
 - **JS** (`js_book`): the emitted `.js` run under bun.
-- **show** (`--show-pct`, 8% of seeds): a solo program whose `main` is
-  pure, `def main() -> T: v` over a printable type (scalars, tuples, List,
-  Maybe, a program datatype, an Array of U32). The C and JS runtimes
-  compute it and print it as a literal at run time; the interpreter's
-  `term_show` of the normal form is the expectation.
-- **modules** (`--module-pct`): the members are split over files that
-  import each other by relative, `../`, absolute, symlinked or hub
-  (`0x<hash>/`) paths under random aliases, one file reached through two
-  paths, all run through the same legs.
-- **effects** (`--effect-pct`): a member declares its own datatype and a
-  foreign `IO` def backed by generated `.c`/`.js` files that build the
-  datatype through `CID(..)` and register with `io_eff(CID(..), ..)`; the
-  expected prints are known to the generator.
-- **clash** (`--clash-pct`): a passing member is mutated into a program
-  that must be refused with a known message: a Base or root name
-  redeclared, an alias given twice, an alias shadowing a dotted name or a
-  declaration, a path with a bad segment, an inner `..`, a symlink to a
-  bad name, a hub file escaping the hub, a bad def name, an unknown
-  `CID`, a constructor named like an effect, one effect file imported from
-  two namespaces, an effect registered twice. Acceptance
-  (`clash-accepted`), another error (`clash-other`) or a crash is a
-  finding.
 
-Programs carry a compiled-only `extra` def (F32 — stuck in the interpreter
-by design — deep fork trees with `!` marks, long loops) compared across the
+Every checked book also meets the template table's invariants: distinct `~`
+argument keys name distinct instances, every instance exists, and a key
+carries its literals exactly.
+
+What a seed's program is — Base or an empty initial environment, free
+declaration names, whether each member sits inline in the entry or in a file
+of its own (relative, `../`, absolute, symlinked or hub paths, one file
+reached through two), a foreign effect (`.c`/`.js` building the member's own
+constructors through `CID(..)`), a clash mutant that must be refused with a
+known message, a pure `main` printed as its literal, the IO tail, the
+surface-syntax rate — is drawn from the seed alone, so a finding's repro
+line reproduces it. Groups of seeds share one compiled program; the group
+size, the C-PAR thread count and the `-O` level are drawn from the group's
+first seed.
+
+Programs carry a compiled-only `extra` def (F32 — stuck in the interpreter by
+design — deep fork trees with `!` marks, long loops) compared across the
 compiled legs with the sequential C run as reference, and an optional
 deterministic IO tail in `main` (file roundtrip, `get_env`, `print_err`,
-`IO.die` exit codes) compared by exact stdout/stderr/exit. A tail may also
-carry an async walk: main forks fibers (a value, a sleep, a batch
-computation, a producer sending into a channel), spawns detached producers,
-receives from channels, reads the clock, registers timer groups, and joins,
-in a random order that a model keeps schedule-independent (a receive is a
-FIFO prefix from one producer or the whole pending sum from several, a
-producer is joined once its sends are received, an epilogue drains, closes
-and joins everything). The compiled legs compare it among themselves with
-no interpreter leg; its prints and answer are known to the generator, or
-cross-leg where a batch value rides in.
+`IO.die` exit codes, and a modeled async walk over fibers, channels and
+timers).
 
-Any disagreement, rejection of generated source, internal crash, or C run
-that outlives its cap while the interpreter finished (livelock suspect) is a
-finding. Checker/worker stack, memory and timeout exhaustion is persisted as a
-skip; compiled CPU and GPU run timeouts are findings.
+Any disagreement, rejection of generated source, internal crash, or compiled
+run that outlives its cap while the interpreter finished (livelock suspect)
+is a finding. Checker/worker stack, memory and timeout exhaustion is
+persisted as a skip; so are the reviewed runtime limits: a `!` reaching
+`F32.show`/`F32.read` on a GPU (`metal-host-only`, `cuda-host-only`), a
+`Char` that is not a Unicode scalar value on the JS runtime
+(`js-char-scalar`), and, when C and JS both stop on it, a Nat past the
+runtimes' 48-bit immediate (`nat-immediate`) or memory exhausted
+(`resource-fault`).
 
 ## Usage
 
@@ -71,114 +62,64 @@ Software/
 
 ```sh
 cd /path/to/Software/bend2-core
-bun ../bend2-fuzzer/fuzz.ts [count] [--seed N] [options]
+bun ../bend2-fuzzer/fuzz.ts [count | duration] [--seed N] [options]
 ```
 
 | flag | meaning |
 | --- | --- |
-| `[count]` | seeds to run (default 100) |
+| `[count]` | seeds to run (default 100), or a duration: `90m`, `12h` |
 | `--seed N` | base seed (reproducible; findings print their exact repro line) |
-| `--jobs N` | batches in flight (default: min(8, cpus−2)) |
-| `--batch N` | seeds merged per compiled program (default 8; `1` disables) |
-| `--threads N` | also run each C binary with `--threads N --gpu off` and compare (default 0 = off) |
+| `--jobs N` | groups in flight (default: min(8, cpus−2)) |
+| `--io-pct N` | percent of seeds carrying an IO tail (default 20) |
 | `--metal` | also build with `-DBEND_METAL` and run `--gpu on` (macOS; GPU-serialized) |
 | `--cuda` | also build with `-DBEND_CUDA` and run `--gpu on` (Linux + NVIDIA) |
-| `--opt N` | clang `-O` level for the C legs (default 1) |
-| `--io-pct N` | percent of seeds carrying an IO tail (default 20) |
-| `--show-pct N` | percent of Base seeds that are a pure `main` printed as its literal (default 8) |
-| `--no-base-pct N` | percent of books starting without Base (default 12) |
-| `--name-pct N` | percent of solo books using unrestricted declaration names (default 20) |
-| `--module-pct N` | percent of seeds laid out as several files (a batch holds one layout) (default 25) |
-| `--effect-pct N` | percent of Base seeds carrying a generated foreign effect (default 25) |
-| `--clash-pct N` | percent of seeds whose passing member is also checked as a clash mutant (default 15) |
-| `--surface-pct N` | chance per synthesis node of a surface wrapper (default 8) |
-| `--check-only` | stop after check + interp + emission (no cc, no runs) |
-| `--smoke` | fixed seed set that must cover a feature checklist and pass |
-| `--loop` | run continuously |
-| `--dump` / `--dump-raw` | print one generated program and exit |
-| `--reduce N` | delta-reduce seed N's failing program to `findings/seed-N.min.bend` |
-| `--keep` / `--profile` | keep temp dirs / per-phase timing report |
+| `--dump` | print the program of `--seed` (both spellings) and exit |
+| `--threads N` / `--opt N` | override the drawn C-PAR thread count / clang `-O` level (repro lines use them) |
+
+A first ^C stops launching groups and lets the ones in flight finish; the
+run then prints its summary.
 
 ## What it generates
 
 Goal-directed synthesis over the current type system, quantity-aware end to
 end: `-x`/`x`/`+x` binder sigils with affine consumption, quantity
-polymorphism (`def f(a, -A: Kind(a), ...)` instantiated at `&1`, `&2` and
-bound quantity variables), data-kinded datatypes (`is Data` / `is Type` /
-`is Kind(a)` / `is Kind(a <&> b)`), the Fill (`D<..>`) and Plus (`+D<..>`)
-sugars, erased params and fields. Every primitive with special compilation
-is reachable: the full U32/F32/Nat op rosters, Bool/Cmp tables, Nat constant
-tables, `String.append`/`cmp`, Char packing, string/list literals, the U32
-and F32 show+read roundtrips, `F32.bits`, `List.map`, `IO.try`, `Array`
-new/get/set/swap/size/clone plus the `a[i]`
-sugar, Map/Set with `del`, `keys` and `from_list`, fork trees with `!` GPU marks, closures and live-1 partial
-application, do-notation (Maybe/Result/IO), equalities, rewrites, minted
-theorems, dependent families (large elimination and the Word idiom). Tail
-loops descend on any chain-shaped data (at most one self field per
-constructor): the program's own such ADTs, base's List at any element
-type (the generic ADT path where Nat takes the native), a String, or a
-Nat; the fuel value is synthesized like any other, so loops run over data
-the program already builds. Every def with control flow comes from one
-production: parameters drawn as types, a match over some of them, leaves
-synthesized against the goal, and a self-call allowed only on a
-sub-field of the decreasing column, so loops over state records,
-tuple-returning walks, tree recursion, multi-scrutinee matches and IO
-loops are the same thing at different goals. Declarations, constructors,
-fields and binders draw from one identifier distribution, and binders
-sometimes shadow a live name, so name resolution composes with every other
-production. Base is an initial-environment choice: without it, its names are
-free. The identifier grammar mixes random characters and length boundaries
-with full identifiers and recombined fragments mechanically collected from the
-whole Bend implementation and reflected JavaScript host properties. Thus Base
-and host-sensitive spellings stay in the sampled space without a hand-written
-exception list. A declaration can also take any earlier declaration and
-concatenate another generated name before or after its final namespace segment,
-covering compiler-generated suffix and prefix collisions. The same datatype, family, definition, match and value productions
-build a book from an empty namespace. Types are terms: the generator also mints
-families, type-level defs by match on an index (`law F: for x: Nat;
-Data` filled by `def F(x): match x: ..`), whose arms may be datatypes
-indexed by the arm's sub-index and holding the family at it (Word's
-idiom), so a `Vec` and its `fill`/`sum` emerge as an applied family
-`F(3n)` unfolds or goes through the family's index-generic defs.
-Propositions are arms and evidence too: `Empty`, equalities of literals,
-`{a != b : T}` refuted through a discriminating family, dependent pairs
-`&x: A -> B` (`Exists`), defs taking evidence about an earlier index
-parameter, laws with `where` and `exs` rows, `Or`/`Pair` spellings, and
-templates (`~f`) on the higher-order kit. The 2026-09 surface is covered: `+` on any
-binder (case fields, variable rows, tuple lets, parallel lets, lambdas,
-do binds and do lets), `h <> t` in terms and patterns, list literal
-patterns with a `_` row, array literals `[x : T*n]` / `[x : T^d]` and the
-`a[i] <- v` statement, bare do steps and `;`, `\u{hex}` escapes,
-`File.read_bytes` read back through a cons-pattern walk, and twin
-arguments `f(x, x)` for the borrow machinery.
+polymorphism, data-kinded datatypes, the Fill and Plus sugars, erased params
+and fields. Types are terms: families (type-level defs by match on an
+index), indexed datatypes holding the family at their index, propositions
+(`Empty`, equalities of literals, their negations) and dependent pairs, with
+index-generic builders, readers and casts. Every def with control flow comes
+from one production (parameters drawn as types, a match over some of them,
+leaves synthesized against the goal, a self-call only on a sub-field of the
+decreasing column), so loops, folds, tree recursion, state records and IO
+loops are the same thing at different goals.
 
-## Batching
-
-`--batch N` merges N seeds into ONE compiled program (a concatenation at
-disjoint uid ranges) whose main prints each member's lines in order — clang
-and process spawn are paid once per batch, attribution stays per line, and
-the interp legs (the bottleneck) run per member across the worker pool. A
-failing batch re-runs members solo at uid base 0, so saved findings
-reproduce under a bare `--seed N`; a batch failing with no failing member is
-itself a finding (`batch-only`). A member whose IO tail ends in `IO.die`
-would end the whole process, so the batch's `main` dispatches on the
-`FZ_MEMBER` environment variable: unset runs the non-dying members, `i`
-runs member i's block and dies — one binary, compiled once, run once
-plainly and once per dying member, every leg alike.
+A result or extra def is a run of statements drawn from three productions:
+a value of any type read to a U32, a parallel let, and a proof composed from
+reflexivity, Base's lemmas and minted inductive theorems. Calls come from one
+registry: the program's own defs and Base's public defs, read off the
+checked Base book with their quantity, type and template parameters, so
+every Array, Map, Set, List, String, Char, Maybe, Result and Pair operation
+Base offers is reachable from any goal of its type (the numeric families
+keep hand-weighted rosters: an arbitrary U32 or Nat argument can unfold a
+unary Nat the interpreter never finishes). Declarations, constructors,
+fields and binders draw from one identifier distribution mixing random
+shapes with words and fragments collected from the whole Bend implementation
+and the JS host; binders sometimes shadow a live name.
 
 ## Output
 
 Findings land in `findings/` (git-ignored) as standalone `.bend` files with
-a verdict header and exact repro line; resource skips in `findings/skipped/`.
-`FZ_FINDINGS=dir` sends them elsewhere.
+a verdict header and exact repro line, beside the build that failed
+(`seed-N.build/`) and a delta-reduced program (`seed-N.min.bend`, the first
+two of each failure class). Resource skips land in `findings/skipped/`.
+`FZ_FINDINGS=dir` sends them elsewhere. The run ends with the counts, a
+phase profile, the skip reasons and the features never reached (Base's
+registry adds one feature per def, `base:<name>`).
+
 The generator is version-controlled but findings are not: a generator edit
 remaps the seeds whose draws pass through the edited site (every statement,
-minted def and adt draws from its own split of the seed's stream, so the
-blast radius is that site's subtree, not the whole program), and the saved
-program is the durable artifact. `--reduce N` shrinks a failing seed's
-program while its failure holds — drop statements, the extra def, the IO
-tail, then unreferenced entries — and saves the result beside the finding.
-Curated repros of open compiler bugs live in `repros/`.
+minted def and adt draws from its own split of the seed's stream), and the
+saved program is the durable artifact.
 
 ## Notes
 
@@ -186,37 +127,3 @@ Curated repros of open compiler bugs live in `repros/`.
 the currently-open compiler bug classes (expected finding noise), and the
 validation recipe. The long doc comment at the top of `fuzz.ts` is the
 design spec proper.
-
-## Parser and specialization oracle
-
-Inline matches on computed terms, default continuations, applied lambdas,
-expression rewrites, constructor destructuring, erased local lets and
-annotations are ordinary `fuzz.ts` productions. They can occur in Base or
-no-Base books beside any compatible type or term production. No-Base books run
-through the checker and interpreter; the C and JS emitters require Base for
-their runtime types.
-
-`keys.ts` has two parts. Its parser-only grammar admits incomplete and
-ill-typed terms and compares `term_key` against an independent structural
-encoding. Its end-to-end cases are checker-valid no-Base books with two legal
-specializations of the same template, covering explicit word trees, NaN
-payloads and signs, `nan`/`inf` references, and annotations within and around
-word chains. Distinct syntax must allocate distinct template instances, and
-payload-distinct values must normalize distinctly.
-
-Run the lanes against an explicit checkout:
-
-```sh
-bun fuzz.ts 2048 --seed 1
-bun keys.ts --root /path/to/bend --fuzz 3000 --seed 1
-```
-
-`campaign.ts` rotates through the compositional differential generator and
-the parser/key oracle in separate processes. The runs never overlap. It stops on the first
-nonzero lane or reported resource skip so the saved artifact can be triaged
-before resuming. The reviewed `metal-host-only` and `cuda-host-only` eligibility
-skips are recorded and allowed to continue:
-
-```sh
-bun campaign.ts --root /path/to/bend --minutes 360 --threads 8 --metal
-```

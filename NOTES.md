@@ -217,6 +217,47 @@ from the one generator:
   takes the index as a type argument; `match e:` with no rows closes an
   Empty branch; a refutation's motive must send the RIGHT side to Empty.
 
+Generalized on 2026-09-24: every per-feature knob and rigid kit folded
+into the general execution.
+
+- **One profile per seed** replaces the percent flags (`--show-pct`,
+  `--no-base-pct`, `--name-pct`, `--surface-pct`, `--module-pct`,
+  `--effect-pct`, `--clash-pct`): `profile(seed)` draws Base or none, free
+  names, file placement, an effect, a clash, a pure main and the surface
+  rate; `--io-pct` stays. A group's size, C-PAR thread count and `-O` level
+  are drawn from its first seed; `--threads`/`--opt` only override them for
+  repro lines. C-PAR always runs.
+- **One layout**: a member is inline in the entry or in a file of its own,
+  mixed within a group; flat programs are the all-inline layout. Every
+  member has a rows def, and main's FZ_MEMBER dispatch calls a dying
+  member's rows directly. Show members may be filed (main reaches their
+  value through the alias, their own types qualified by it).
+- **One pipeline**: the interpreter leg is one `eval` worker mode (raw and
+  sealed, or a show main); the clash leg is a program with a must-refuse
+  expectation through the same compile-and-run path (`compiled()`); known
+  lane limits (`host-only`, `js-char-scalar`) are isolated per member like
+  failures and recorded as skips.
+- **One registry**: Base's public defs are read off the checked Base book
+  (`base_registry_load`) into the call registry, with template parameters
+  (`~`, closed arguments) and masked Nat arguments; the numeric families
+  keep their rosters. Any goal may take a registry call. This subsumes the
+  array, map, set and List.map kits and reaches ~120 Base defs.
+- **Three statement productions**: `let_value` (any type, read to a U32;
+  floats, arrays, maps, sets, calls and shared values are values),
+  `let_fork`, `let_proof` (reflexivity, `U32.add_comm`, a minted inductive
+  theorem, composed by `Equal.sym/cong/trans`). The Word-idiom kit's cast
+  became `fam-cast` on every family; container pairs (`Array<T> & T`,
+  `Map<..> & Bool`, `Set() & Bool`, ..) are types `syn_ty` draws.
+- **keys.ts** became the worker's template-table check on every checked
+  book; **campaign.ts** became the duration count (`fuzz.ts 12h`);
+  `--smoke` became the end-of-run list of features never reached;
+  `--reduce` became automatic (the first two findings of each class);
+  `--keep` became the finding's saved build; `--profile` is always on.
+- Found while generalizing: a template's argument is substituted where it
+  may head an application, and the rewrite surface form does not infer, so
+  template arguments take no rewrite wrapper (`c.s.tmpl`); an array literal
+  needs a Data element.
+
 Restructured on 2026-09-02:
 
 - **Ctx**: the generator's state is one `State` (entries, adts, registry,
@@ -424,14 +465,48 @@ drowns real signal. Delta-reduced repros for all of these sit in
   is about twice as fast since `7c2d194`: the repro takes 15.7s of user
   time against 27.3s at its parent, same output.
 - The generator drifted from base twice by 2026-09-10 and both showed up
-  as `raw-reject` in `--smoke`: `Array.clone` gained `-T: Data`
-  (`592b0df`) and `Result.fail` was removed (spell the `Fail{..}` ctor).
-  Re-run `--smoke` after any base change before trusting a long run.
+  as `raw-reject`: `Array.clone` gained `-T: Data` (`592b0df`) and
+  `Result.fail` was removed (spell the `Fail{..}` ctor). Since 2026-09-24
+  Base's own signatures feed the registry, so a signature change moves the
+  generator with it; hand-spelled Base calls (rosters, readers, the IO
+  tail) can still drift. Run a thousand seeds after any base change before
+  trusting a long run.
 - `trans-ulp` skips: float transcendentals are each backend's libm-family
   routines; a `trans`-flagged member keeps every leg except the JS-vs-C
   (and GPU) comparison of its extra line, which downgrades to a counted
   skip on mismatch. In practice bun's Math agrees bit-exactly with macOS
   libm floats on everything probed, so these are rare.
+
+- **The 2026-09-24 twelve-hour run** (`findings/run-2026-09-24/`, 384,774
+  CPU programs and 32,108 Metal programs on bend2-core `95317d95`) found
+  these open classes; repros in `repros/`:
+  - F1 `leg-diverge`, the most frequent (42 of 111): `Bool.or`/`||` and
+    `Bool.xor` in C read a boxed Bool Term as a native 0/1 (the `bool_`
+    intrinsic template); deleting that `tpl_ops` line makes every instance
+    agree. `comp_bool_or_boxed_operand.bend`, `..._scrutinee.bend`,
+    `comp_bool_xor_boxed_operand.bend`.
+  - F2 `raw-reject`: a file whose namespace is a Base family prefix
+    (`Word.bend`) resolves bare names into Base's (`Nil` -> `Word.Nil`).
+    `ns_base_prefix_capture/`.
+  - F3 `cc-fail`: Apple clang 17 crashes at `-O0` ("live register clobbered
+    by inserted prologue instructions"; `-fno-stack-check` avoids it). Not
+    Bend's; `bend -o` uses `-O3`.
+  - F4 `raw-reject`: `import ./m.bend as m` then `m.f()` is "ambiguous".
+    `alias_is_own_namespace/`.
+  - F5 `raw-reject`: a nested match refused as "an undestructed scrutinee"
+    when a later row has a list-literal pattern.
+    `check_nested_match_later_literal.bend`.
+  - F6 `raw-reject`: any `Array.set(..);` parses as the write statement
+    `a = a[i] <- v; ..`, swallowing an inline match's next row.
+    `parse_array_set_swallows_row.bend`.
+  - F7 `compiler-crash`: an Array of an equality type kills both emitters
+    ("an open Array element type"). `comp_array_of_equality.bend`.
+  - Still open from earlier runs: K1 `F32.show` tie rounding (C
+    `417.70312`, JS `417.70313`), K2 the bracket wall.
+  - Reviewed limits, counted as skips: `js-char-scalar` (a Char past
+    U+10FFFF or a surrogate stops the JS runtime), `nat-immediate` (a Nat
+    past 2^48-1 stops both runtimes; the spec's Nat is unbounded),
+    `resource-fault` (memory exhausted on every leg), `*-host-only`.
 
 ## What it cannot find (by design)
 
@@ -447,43 +522,10 @@ drowns real signal. Delta-reduced repros for all of these sit in
 
 ## Validation recipe after touching the generator
 
-The 2026-09-21 coverage is compositional in `fuzz.ts`: Base presence, the
-initial name set, declaration and binder names, datatype shapes and surface
-terms are independent generator choices. No-Base books use the same type and
-term productions. Base only contributes occupied initial names. The general
-identifier grammar samples random shapes plus full words and recombined
-fragments derived mechanically from all Bend sources and reflected JavaScript
-host properties, rather than a hand-written list of known-sensitive spellings.
-Declaration names may also prepend or append a newly generated identifier to
-the final segment of any declaration already present in the book; the source
-and derived name therefore compose with every declaration role.
-No-Base books then run through the checker and interpreter because the
-emitters require Base's runtime types. `keys.ts` remains a separate oracle
-because its parser grammar intentionally includes ill-typed and incomplete
-terms. There is no independent evaluator, negative-checker sweep or generated
-FFI. `campaign.ts` serializes the main differential generator and parser/key
-oracle, stopping when either saves a finding or reports a resource skip. A GPU
-path reaching `F32.show` or `F32.read` is
-the reviewed `metal-host-only` / `cuda-host-only` eligibility class; the
-campaign records it and continues because the device intentionally omits those
-operations. Other skip classes pause for triage.
-
-The earlier isolated-lane validation against Bend 2.0.22 is historical; rerun
-the recipe below after this integration. In particular, emitter failures from
-surface forms and unrestricted names are findings to triage, not reasons to
-route those productions around the compiled backends.
-
 1. `bunx tsc --noEmit` in this repo — clean.
-2. A reject sweep: `for s in $(seq 1 120); do` dump + `--check` each seed;
-   zero rejects expected — every reject is a generator bug or a checker
-   finding, look before dismissing.
-3. `bun ../bend2-fuzzer/fuzz.ts --smoke` from the bend2-core root — all
-   pass, no `smoke missing features` line. The smoke seeds are hand-picked
-   per generator version (per-feature smallest-passing-seed, solo-verified).
-   Splits keep most edits from touching them; when the smoke run reports a
-   missing feature or a smoke seed fails after a generator edit, re-pick.
-4. A few hundred seeds: `raw-reject` and `generator-reject` must be ZERO;
-   `compiler-crash`/`leg-*` findings are expected while the classes above
-   stay open.
-5. `--threads 4 --metal` on a handful of seeds if touching anything the
-   parallel or GPU legs see.
+2. `bun ../bend2-fuzzer/fuzz.ts 1000 --seed 1` from the bend2-core root:
+   `raw-reject`, `generator-reject` and `FUZZER ERROR` must be ZERO — each
+   is a generator bug or a checker finding, look before dismissing; the
+   `never reached` line lists features the edit may have starved.
+3. `--metal` on a few hundred seeds if touching anything the parallel or GPU
+   legs see.

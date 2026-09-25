@@ -4,24 +4,29 @@
 // in two algebraically-equal spellings (raw and identity-sealed) and runs it
 // across every leg:
 //
-//   - interp (the spec): term_snf on a pure `result` def, raw and sealed —
-//     both spellings in one book, evaluated in parallel — the trusted-kernel
-//     evaluation path. The raw value is the oracle; the sealed one must
-//     equal it, so a broken seal cannot bless itself. The interpreter runs
-//     base's structural code (Word adder chains), so this leg is also a
-//     bit-level spec differential against the native ops the backends
-//     substitute.
-//   - C (compile_book): one standalone .c, built with clang and run
-//     sequentially (--threads 1 --gpu off). Lanes on the SAME binary:
-//     --threads N --gpu off (CPU parallelism, --threads flag) — plus
-//     separate builds for Metal (--metal) and CUDA (--cuda), run --gpu on.
+//   - interp (the spec): term_snf on the result defs, raw and sealed, or on
+//     a pure main, printed by term_show — the trusted-kernel evaluation
+//     path, and the only leg a book without Base has. The raw value is the
+//     oracle; the sealed one must equal it, so a broken seal cannot bless
+//     itself. The interpreter runs base's structural code (Word adder
+//     chains), so this leg is also a bit-level spec differential against the
+//     native ops the backends substitute.
+//   - C (compile_book): one standalone .c, built with clang at the group's
+//     drawn -O level and run sequentially (--threads 1 --gpu off), then in
+//     parallel at the group's drawn thread count; with --metal / --cuda the
+//     same .c is rebuilt for the device and run --gpu on.
 //   - JS (js_book): the emitted .js run under bun.
-//   - show (--show-pct, 8% of seeds): a solo program whose main is PURE,
-//     `def main() -> T: v` over a printable type. The C and JS runtimes
-//     compute it and print it as a literal at run time (show_val, driven
-//     by a descriptor of main's type); the interpreter's term_show of the
-//     normal form is the expectation. Such a seed closes the batch before
-//     it and runs alone: its main is the program's.
+//
+// Every checked book also meets the template table's invariants (distinct
+// ~ argument keys name distinct instances; a key carries its literals
+// exactly), which every generated template call exercises.
+//
+// What a seed's program is — Base or an empty initial environment, free
+// declaration names, whether the member sits in a file of its own, a
+// foreign effect, a clash mutant, a pure printed main, the IO tail, the
+// surface-syntax rate — is its profile, drawn from the seed alone (see
+// profile()), so a solo re-run reproduces it. Only --io-pct shapes it from
+// the command line.
 //
 // The program shape ties the legs together:
 //
@@ -135,33 +140,44 @@
 // counts down a long Nat. Arrays are a type like any other (a parameter, a
 // field, a goal), linear, read and measured through pairs.
 //
-// Primitives with special compilation (comp.ts OPERATIONS/OPTIMIZED and
-// base.bend's native claims) are all reachable: the full U32/F32/Nat op
-// rosters, Bool/Cmp tables, String.append/cmp, Char packing, string and
-// list literals, the U32 and F32 show+read roundtrips, F32.bits, Array new/get/set/swap/
-// size/clone plus the a[i] / a[i] <- v sugar, Map/Set (the one family that
-// runs as written), Nat constant tables (CONSTV), fork trees with `!` GPU
-// marks, closures, partial application, erased params/fields.
+// STATEMENTS ARE THREE PRODUCTIONS: a value of any type read to a U32, a
+// parallel let (the one fork shape, `!`-marked at times) and a proof
+// (reflexivity, Base's lemmas, a minted inductive theorem, composed by
+// Equal.sym/cong/trans, then rewritten on). CALLS ARE ONE REGISTRY: the
+// defs the program mints and Base's own public defs, read off the checked
+// Base book (quantity, type and template parameters included), so every
+// Array, Map, Set, List, String, Char, Maybe, Result and Pair operation Base
+// offers is a call any goal of its type may take; the numeric families keep
+// hand-weighted rosters (num_gen_*) because an arbitrary U32 or Nat argument
+// can unfold a unary Nat the interpreter never finishes. Primitives with
+// special compilation (comp.ts OPERATIONS/OPTIMIZED and base.bend's native
+// claims) are all reachable: the full U32/F32/Nat op rosters, Bool/Cmp
+// tables, Char packing, string and list literals, the U32 and F32 show+read
+// roundtrips, F32.bits, the a[i] / a[i] <- v array sugar, Nat constant
+// tables (CONSTV), fork trees with `!` GPU marks, closures, partial
+// application (of Base's natives too), templates, erased params/fields.
 //
-// BATCHING (--batch N): N seeds merge into ONE compiled program — a
-// concatenation at disjoint uid ranges, no book surgery — whose main
-// prints each member's result/tail/extra in order, so clang and process
-// spawn are paid once per batch while attribution stays per-line. The
-// interp legs run per member (they are the bottleneck and parallelize
-// across the worker pool). A member whose tail dies gets its own main
-// block behind the FZ_MEMBER environment variable, so one binary serves
-// the plain run and one run per dying member. A failing batch re-runs its
-// members solo at uid base 0, so saved findings reproduce under a bare
-// --seed N; a batch that fails when no member does is itself a finding
-// (batch-only: the merge or whole-book emission is at fault).
+// GROUPS: a group of seeds (its size drawn from its first seed) merges into
+// ONE compiled program — a concatenation at disjoint uid ranges, or files
+// apart by namespace — whose main prints each member's result/tail/extra in
+// order, so clang and process spawn are paid once per group while
+// attribution stays per-line. The interp legs run per member (they are the
+// bottleneck and parallelize across the worker pool). A member whose tail
+// dies is reached through the FZ_MEMBER environment variable, so one binary
+// serves the plain run and one run per dying member. A failing group re-runs
+// its members solo at uid base 0 under the group's lanes, so saved findings
+// reproduce under their repro line; a group that fails when no member does
+// is itself a finding (batch-only: the merge or whole-book emission is at
+// fault).
 //
 // Findings land in findings/seed-N.bend (program + verdict header + exact
-// repro line). Checker/worker resource exhaustion is persisted as a skip;
-// a compiled CPU or GPU run that outlives its cap is a finding for triage.
-// The generator is version-controlled but findings are
-// not: a generator edit remaps the seeds whose draws reach the edited site
-// (each adt, statement and minted def draws from its own split stream),
-// so the saved program is the durable artifact; --reduce N shrinks one.
+// repro line), beside the build that failed and a delta-reduced program.
+// Checker/worker resource exhaustion is persisted as a skip; a compiled CPU
+// or GPU run that outlives its cap is a finding for triage. The generator is
+// version-controlled but findings are not: a generator edit remaps the seeds
+// whose draws reach the edited site (each adt, statement and minted def
+// draws from its own split stream), so the saved program is the durable
+// artifact.
 
 import * as child from "node:child_process";
 import * as fs from "node:fs";
@@ -202,85 +218,58 @@ const cli_opt = (s: string, d: string): string => {
   const i = argv.indexOf(s);
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : d;
 };
-const VALUED_FLAGS = ["--seed", "--jobs", "--threads", "--opt", "--batch", "--pool",
-  "--io-pct", "--show-pct", "--no-base-pct", "--name-pct", "--surface-pct", "--reduce",
-  "--module-pct", "--effect-pct", "--clash-pct"];
-const COUNT = Number(argv.find((a, i) => /^\d+$/.test(a) && !VALUED_FLAGS.includes(argv[i - 1] ?? "")) ?? "100");
+const VALUED_FLAGS = ["--seed", "--jobs", "--io-pct", "--threads", "--opt"];
+// the count: a number of seeds, or a duration (90m, 12h) to run until
+const COUNT_ARG = argv.find((a, i) => /^\d+(?:\.\d+)?[smh]?$/.test(a) && !VALUED_FLAGS.includes(argv[i - 1] ?? "")) ?? "100";
+const COUNT_UNIT = /[smh]$/.exec(COUNT_ARG)?.[0];
+const COUNT = COUNT_UNIT === undefined ? Number(COUNT_ARG) : Infinity;
+const DEADLINE = COUNT_UNIT === undefined ? Infinity
+  : Date.now() + parseFloat(COUNT_ARG) * { s: 1_000, m: 60_000, h: 3_600_000 }[COUNT_UNIT as "s" | "m" | "h"];
 const BASE_SEED = BigInt(cli_opt("--seed", String(Math.floor(Math.random() * 2 ** 48))));
 const JOBS = Number(cli_opt("--jobs", String(Math.max(1, Math.min(8, os.cpus().length - 2)))));
-// THREADS : 0 disables the CPU-parallel lane; N > 0 runs the C binary a
-// second time with --threads N --gpu off and compares against the seq run
-const THREADS = Number(cli_opt("--threads", "0"));
 const WITH_METAL = cli_flag("--metal");
 const WITH_CUDA = cli_flag("--cuda");
 const IO_PCT = Math.max(0, Math.min(100, Number(cli_opt("--io-pct", "20"))));
-const SHOW_PCT = Math.max(0, Math.min(100, Number(cli_opt("--show-pct", "8"))));
-const NO_BASE_PCT = Math.max(0, Math.min(100, Number(cli_opt("--no-base-pct", "12"))));
-const FREE_NAME_PCT = Math.max(0, Math.min(100, Number(cli_opt("--name-pct", "20"))));
-const SURFACE_PCT = Math.max(0, Math.min(100, Number(cli_opt("--surface-pct", "8"))));
-const MODULE_PCT = Math.max(0, Math.min(100, Number(cli_opt("--module-pct", "25"))));
-const EFFECT_PCT = Math.max(0, Math.min(100, Number(cli_opt("--effect-pct", "25"))));
-const CLASH_PCT = Math.max(0, Math.min(100, Number(cli_opt("--clash-pct", "15"))));
-const KEEP = cli_flag("--keep");
-const PROFILE = cli_flag("--profile");
-const BATCH = Math.max(1, Math.min(64, Number(cli_opt("--batch", "8"))));
-const LOOP = cli_flag("--loop");
-const SMOKE = cli_flag("--smoke");
-const CHECK_ONLY = cli_flag("--check-only");
-const OPT = "-O" + cli_opt("--opt", "1");
-const REDUCE = cli_opt("--reduce", "");
+// repro overrides of the lane parameters a group draws (see group_lanes):
+// a finding isolated out of a batch runs under the batch's own
+const THREADS_ARG = cli_opt("--threads", "");
+const OPT_ARG = cli_opt("--opt", "");
 
 function print_help(): void {
   process.stdout.write([
     "bend2 differential fuzzer — generates typed Bend programs and cross-checks",
-    "the interpreter (spec), the compiled C backend (seq / threads / Metal /",
-    "CUDA) and the compiled JS backend.",
+    "the interpreter (spec), the compiled C backend (sequential, parallel,",
+    "Metal, CUDA) and the compiled JS backend.",
     "",
     "Usage: bun fuzz.ts [count] [options]   (from the bend2-core repo root,",
     "       or with bend2-core as a sibling checkout)",
     "",
-    "  count          seeds to run (default 100)",
+    "  count          seeds to run (default 100), or a duration: 90m, 12h",
     "",
     "Options:",
     "  --seed N       base seed (default: random; findings print their repro)",
-    "  --jobs N       parallel batches in flight (default: min(8, cpus-2))",
-    "  --threads N    ALSO run each C binary with --threads N --gpu off and",
-    "                 compare against the sequential run (default 0 = off)",
+    "  --jobs N       parallel groups in flight (default: min(8, cpus-2))",
+    "  --io-pct N     percent of seeds with a deterministic IO tail in main",
+    "                 (files, env, stderr, exit codes, fibers, channels,",
+    "                 timers; default 20)",
     "  --metal        ALSO build each program with -DBEND_METAL and run",
     "                 --gpu on (macOS; GPU runs are serialized)",
     "  --cuda         ALSO build each program with -DBEND_CUDA and run",
     "                 --gpu on (Linux + NVIDIA)",
-    "  --opt N        clang -O level for the C legs (default 1)",
-    "  --batch N      seeds merged per compiled program, 1..64 (default 8)",
-    "  --pool N       interp/emit worker pool size (default: from jobs)",
-    "  --io-pct N     percent of seeds with a deterministic IO tail in main",
-    "                 (file roundtrip, get_env, print_err, IO.die; default 20)",
-    "  --no-base-pct N percent of books generated without importing Base (default 12)",
-    "  --name-pct N    percent of books using unrestricted declaration names (default 20)",
-    "  --surface-pct N chance per synthesis node of a surface wrapper (default 8)",
-    "  --module-pct N  percent of seeds laid out as modules: each member a file",
-    "                  under a generated path the entry imports (default 25)",
-    "  --effect-pct N  percent of Base seeds carrying a foreign effect (a .c and",
-    "                  a .js building the member's constructors; default 25)",
-    "  --clash-pct N   percent of seeds whose module layout is also mutated by",
-    "                  one name clash that must be refused (default 15)",
-    "  --check-only   stop after check + interp + emission (no cc, no runs)",
-    "  --syntax       compatibility alias; surface forms are always generated",
-    "  --show-pct N   percent of seeds that are a pure main printed as its literal (default 8)",
-    "  --smoke        run the fixed smoke-seed set and assert feature coverage",
-    "  --loop         run continuously until a finding",
-    "  --keep         keep temporary build dirs",
-    "  --profile      print a phase-timing report at the end",
-    "  --dump         print the generated sealed program for --seed and exit",
-    "  --dump-raw     print the raw (unsealed) sibling and exit",
-    "  --reduce N     delta-reduce seed N's failing program (drop statements,",
-    "                 the extra def, the IO tail, then unreferenced entries",
-    "                 while the same failure holds) to findings/seed-N.min.bend",
+    "  --dump         print the program of --seed (both spellings) and exit",
     "  -h, --help     show this help and exit",
     "",
-    "Findings land in findings/ (git-ignored) with a `repro:` header line;",
-    "resource skips in findings/skipped/. See the top-of-file comment for the",
-    "full model.",
+    "Everything else is drawn per seed: Base or an empty environment, free",
+    "declaration names, the file layout, foreign effects, name clashes, a",
+    "pure printed main, the surface-syntax rate; per group: the batch size,",
+    "the C-PAR thread count and the clang -O level (--threads N / --opt N",
+    "override the last two; repro lines use them).",
+    "",
+    "Findings land in findings/ (git-ignored) with a `repro:` header line, a",
+    "reduced program beside them (seed-N.min.bend) and the compiled sources",
+    "(seed-N.build/); resource skips in findings/skipped/. FZ_FINDINGS=dir",
+    "saves elsewhere. The run ends with a phase profile and the features",
+    "never reached. See the top-of-file comment for the full model.",
     "",
   ].join("\n"));
 }
@@ -302,9 +291,6 @@ function phase_note(name: string, t: number): void {
 }
 
 async function phase<A>(name: string, f: () => Promise<A>): Promise<A> {
-  if (!PROFILE) {
-    return f();
-  }
   const t = performance.now();
   try {
     return await f();
@@ -314,9 +300,6 @@ async function phase<A>(name: string, f: () => Promise<A>): Promise<A> {
 }
 
 function phase_sync<A>(name: string, f: () => A): A {
-  if (!PROFILE) {
-    return f();
-  }
   const t = performance.now();
   try {
     return f();
@@ -355,10 +338,6 @@ function rng_mix64(x: bigint): bigint {
   z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & M64;
   z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & M64;
   return z ^ (z >> 31n);
-}
-
-function seed_roll(seed: bigint, salt: bigint): number {
-  return Number(rng_mix64(seed ^ salt) % 100n);
 }
 
 // str_hash : FNV-1a over the label's code units
@@ -528,7 +507,7 @@ type T =
   | { k: "str" }
   | { k: "unit" }
   | { k: "tvar"; n: string; q: QT }
-  | { k: "adt"; a: Adt; qs: QT[]; args: T[]; iargs?: string[]; spell?: "or" }
+  | { k: "adt"; a: Adt; qs: QT[]; args: T[]; iargs?: string[]; spell?: "or" | "bar" }
   | { k: "app"; f: Fam; arg: string }
   | { k: "empty" }
   | { k: "sig"; x: string; a: T; b: T; spell: "amp" | "exists" | "sigma" }
@@ -537,7 +516,8 @@ type T =
   | { k: "arr"; el: T }
   | { k: "io"; t: T }
   | { k: "map"; q: QT; v: T }
-  | { k: "eql"; t: T; side: string; rhs?: string; spell?: "ne" };
+  | { k: "eql"; t: T; side: string; rhs?: string; spell?: "ne" }
+  | { k: "set" };
 // Propositions are types: Empty has no value, {a == b : T} has one when the
 // sides agree, a dependent pair &x: A -> B holds a witness with evidence
 // about it (Exists), a family may send an index to Empty or to an
@@ -585,7 +565,8 @@ type Adt = {
 type IVar = { n: string; t: T; sub?: boolean };
 //   sub: the term is a family arm's sub-index (the one place an unfinished
 //   family may be applied: the self-call must decrease)
-type FamArm = { pat: string; sub: string | null; lit: string | null; ty: T };
+type FamArm = { pat: string; sub: string | null; lit: string | null; ty: T; src?: string };
+//   src: the name the sub-index binds under before its reusable re-bind
 type Fam = { name: string; idx: T; kind: QT; arms: FamArm[]; done: boolean };
 //   done: false while the arms are being drawn, when the family may be
 //   applied only at its own sub-index (the self-call must decrease)
@@ -598,6 +579,9 @@ const CMPC: T = { k: "cmp" };
 const CHARC: T = { k: "char" };
 const STRC: T = { k: "str" };
 const UNITC: T = { k: "unit" };
+// Base's Set: a Data type with no constructor the generator sees, built and
+// read only through Base's own Set.* calls
+const SETC: T = { k: "set" };
 
 // Base generic ADTs (base.bend shapes, quantity params included)
 // --------------------------------------------------------------
@@ -670,11 +654,15 @@ function ty_str(t: T): string {
     case "char": return "Char";
     case "str": return "String";
     case "unit": return "Unit";
+    case "set": return "Set()";
     case "tvar": return t.n;
     case "adt": {
       const iargs = t.iargs ?? [];
       if (t.spell === "or") {
         return "Or(" + t.args.map(ty_grp).join(", ") + ")";
+      }
+      if (t.spell === "bar") {
+        return t.args.map(ty_grp).join(" | ");
       }
       if (t.qs.length + t.args.length + iargs.length === 0) {
         return t.a.name;
@@ -732,7 +720,7 @@ function ty_top(t: T): string {
 // tuple components inside other types, and type arguments (a FIRST argument
 // after `<` commits on one token; parens are harmless on the rest)
 function ty_grp(t: T): string {
-  return t.k === "fun" || (t.k === "tup" && t.q === 1 && t.spell === undefined) || (t.k === "sig" && t.spell === "amp")
+  return t.k === "fun" || (t.k === "tup" && t.q === 1 && t.spell === undefined) || (t.k === "sig" && t.spell === "amp") || (t.k === "adt" && t.spell === "bar")
     ? "(" + ty_str(t) + ")" : ty_str(t);
 }
 
@@ -744,7 +732,7 @@ function ty_eq(a: T, b: T): boolean {
 function ty_quant(t: T): QT {
   switch (t.k) {
     case "u32": case "f32": case "nat": case "bool": case "cmp":
-    case "char": case "str": case "unit": case "eql":
+    case "char": case "str": case "unit": case "eql": case "set":
       return Q2;
     case "tvar": return t.q;
     case "adt": {
@@ -955,6 +943,13 @@ type DefR = {
   ps: Array<{ q: BQ; t: T; n?: string; dep?: boolean }>;
   ret: T;
   mask?: Array<number | null>;
+  // tm : the leading template parameters (written ~x, their arguments
+  // closed); base : read off Base's own signatures
+  tm?: number;
+  base?: boolean;
+  // hdr : the quantity and type parameters in the telescope's own order,
+  // when they interleave (List.zip's a, A, b, B)
+  hdr?: string[];
   // wip: the def's own leaves are being drawn; a self-call passes one of
   // the current sub-fields at the decreasing column (col), each once
   wip?: { col: number; ps: V[]; subs: V[]; calls: number };
@@ -983,6 +978,11 @@ type State = {
   // trans : set when a member computes a float transcendental — JS-vs-C
   // on the extra line downgrades to a counted skip for that member
   trans: boolean;
+  // surface : the chance per synthesis node of a surface wrapper
+  surface: number;
+  // tmpl : drawing a template's argument, which its instance substitutes
+  // where it may head an application (a head must infer: no rewrite form)
+  tmpl: boolean;
 };
 
 class Ctx {
@@ -1056,11 +1056,117 @@ class Ctx {
   }
 }
 
-function ctx_new(seed: bigint, uid0: number, base: boolean, freeNames: boolean): Ctx {
+function ctx_new(seed: bigint, uid0: number, base: boolean, freeNames: boolean, surface: number): Ctx {
   const names = new Set(base ? BASE_NAMES : CORE_NAMES);
   const decls = new Set(base ? BASE_DECL_NAMES : []);
-  return new Ctx({ uid: uid0, base, freeNames, names, decls, entries: [], adts: [], fams: [], defr: [], memo: new Map(), wip: new Set(),
-    wips: [], mints: 0, feat: {}, pure: true, trans: false }, new Gen(rng_mix64(seed)));
+  return new Ctx({ uid: uid0, base, freeNames, names, decls, entries: [], adts: [], fams: [], defr: base ? BASE_DEFR.slice() : [],
+    memo: new Map(), wip: new Set(), wips: [], mints: 0, feat: {}, pure: true, trans: false, surface, tmpl: false }, new Gen(rng_mix64(seed)));
+}
+
+// Base's signatures
+// -----------------
+// Base's public defs (Family.fn) join the call registry, read off the checked
+// Base book: a quantity binder is a quantity parameter, an erased type binder
+// a type parameter, the rest value parameters, the first x of them templates
+// (written ~). A def enters when every type in its telescope has a spelling in
+// T; effects (IO) and dependent types have none and stay out. The numeric
+// families keep their hand-weighted rosters (num_gen_*): a U32 or Nat call at
+// an arbitrary argument can unfold a unary Nat the interpreter never
+// finishes. A Nat argument is masked small (base loops over it).
+
+const BASE_DEFR: DefR[] = [];
+
+async function base_registry_load(): Promise<void> {
+  const bend = await import(pathToFileURL(BEND_TS).href);
+  const book = bend.book_nil();
+  await bend.book_load(book, fs.realpathSync(path.join(ROOT, "bend2", "base.bend")), "", new Map());
+  bend.book_valid(book);
+  type L = { $: string; [k: string]: any };
+  type B = { n: string; kind: "q" | "t" | "v"; q?: QT };
+  const q_of = (t: L, env: B[]): QT | null => {
+    switch (t.$) {
+      case "Qua": return t.q.$ === "None" ? Q0 : t.q.$ === "Lone" ? Q1 : Q2;
+      case "Var": return env[t.i]?.kind === "q" ? { k: "qv", n: env[t.i].n } : null;
+      case "Min": {
+        const a = q_of(t.a, env);
+        const b = q_of(t.b, env);
+        return a === null || b === null ? null : { k: "qm", a, b };
+      }
+      default: return null;
+    }
+  };
+  const ty_of = (t: L, env: B[]): T | null => {
+    switch (t.$) {
+      case "Ref": return ({ U32: U32C, F32: F32C, Nat: NATC, Bool: BOOLC, Cmp: CMPC, Char: CHARC, String: STRC, Unit: UNITC, Empty: { k: "empty" }, Set: SETC } as Record<string, T>)[t.k] ?? null;
+      case "Var": return env[t.i]?.kind === "t" ? { k: "tvar", n: env[t.i].n, q: env[t.i].q as QT } : null;
+      case "App": {
+        if (t.f.$ === "App" && t.f.f.$ === "Ref" && t.f.f.k === "Pair") {
+          const a = ty_of(t.f.x, env);
+          const b = ty_of(t.x, env);
+          return a === null || b === null ? null : { k: "tup", a, b, q: 1 };
+        }
+        return null;
+      }
+      case "ADT": {
+        if (t.k === "Array") {
+          const el = ty_of(t.x[0], env);
+          return el === null ? null : { k: "arr", el };
+        }
+        if (t.k === "Map") {
+          const q = q_of(t.x[0], env);
+          const v = ty_of(t.x[1], env);
+          return q === null || v === null ? null : { k: "map", q, v };
+        }
+        const a = BASE[t.k];
+        if (a === undefined) {
+          return null;
+        }
+        const qs = t.x.slice(0, a.qps.length).map((x: L) => q_of(x, env));
+        const args = t.x.slice(a.qps.length).map((x: L) => ty_of(x, env));
+        return qs.includes(null) || args.includes(null) ? null : { k: "adt", a, qs, args };
+      }
+      case "All": {
+        const dom = ty_of(t.A, env);
+        const cod = ty_of(t.B, [...env, { n: t.k, kind: "v" }]);
+        const q: BQ = t.q.$ === "None" ? 0 : t.q.$ === "Lone" ? 1 : 2;
+        return dom === null || cod === null ? null : { k: "fun", q, dom, cod };
+      }
+      default: return null;
+    }
+  };
+  for (const name of Object.keys(book.tlds)) {
+    const d = book.tlds[name];
+    const fam = name.split(".");
+    if (d.$ !== "Def" || fam.length !== 2 || ["U32", "F32", "Nat"].includes(fam[0])) {
+      continue;
+    }
+    const env: B[] = [];
+    const r: DefR = { name, qps: [], tps: [], ps: [], ret: UNITC, tm: d.x ?? 0, base: true, mask: [], hdr: [] };
+    let t: L = bend.term_lower(d.T);
+    let ok = true;
+    for (; ok && t.$ === "All"; t = t.B) {
+      if (t.A.$ === "Qnt" || t.A.$ === "Typ") {
+        // a quantity or type parameter after a value one has no spelling in
+        // the registry's call order
+        const q = t.A.$ === "Typ" ? q_of(t.A.g, env) : Q0;
+        ok = r.ps.length === 0 && q !== null;
+        env.push({ n: t.k, kind: t.A.$ === "Qnt" ? "q" : "t", q: q ?? Q0 });
+        (r.hdr as string[]).push(t.k);
+        (t.A.$ === "Qnt" ? r.qps : r.tps as unknown[]).push(t.A.$ === "Qnt" ? t.k : { n: t.k, q });
+        continue;
+      }
+      const pt = ty_of(t.A, env);
+      ok = pt !== null;
+      r.ps.push({ q: t.q.$ === "None" ? 0 : t.q.$ === "Lone" ? 1 : 2, t: pt ?? UNITC });
+      (r.mask as Array<number | null>).push(pt?.k === "nat" ? 8 : null);
+      env.push({ n: t.k, kind: "v" });
+    }
+    const ret = ok ? ty_of(t, env) : null;
+    if (ret !== null) {
+      r.ret = ret;
+      BASE_DEFR.push(r);
+    }
+  }
 }
 
 // Size
@@ -1151,6 +1257,7 @@ const NAME_WORDS = [...new Set([
 ].map((m) => m[0]).concat(HOST_NAMES))]
   .filter((name) => /^[A-Za-z_][A-Za-z_0-9]*$/.test(name) && !KEYWORDS.includes(name));
 const DECL_WORDS = [...new Set([...NAME_WORDS, ...BASE_DECL_NAMES])];
+const DECL_SET = new Set(DECL_WORDS);
 const NAME_FRAGMENTS = [...new Set([
   ...NAME_TEXT.matchAll(/[A-Za-z_][A-Za-z_0-9]*/g),
 ].map((m) => m[0]).concat(HOST_NAMES).flatMap((name) => name
@@ -1217,7 +1324,10 @@ function decl_name(c: Ctx, hint: string): string {
       name = parts.join(".");
       c.feat("name-affix");
     }
-    if (!c.names.has(name) && !KEYWORDS.includes(name) && name !== "_") {
+    // the shape of the generator's own uid names (a stem, a uid, a letter)
+    // is theirs, unless the word is one the implementation spells
+    const minted = c.freeNames && MINTED.test(name.slice(name.lastIndexOf(".") + 1)) && !DECL_SET.has(name);
+    if (!minted && !c.names.has(name) && !KEYWORDS.includes(name) && name !== "_") {
       c.names.add(name);
       c.decls.add(name);
       if (c.freeNames) c.feat("free-name");
@@ -1321,27 +1431,6 @@ function helper_strlen(c: Ctx): string {
   });
 }
 
-// helper_may : Maybe<&2, U32> -> U32 (the U32 show/read roundtrip)
-function helper_mayf32(c: Ctx): string {
-  return helper(c, "mayf", "mf", (c, n) => {
-    const m = bind_name(c, []);
-    const alt = bind_name(c, [], [m]);
-    const v = bind_name(c, [], [m, alt]);
-    return "def " + n + "(" + m + ": Maybe<&2, F32>, " + alt + ": F32) -> F32:\n  match " + m
-      + ":\n    case None{}:\n      " + alt + "\n    case Some{" + v + "}:\n      " + v;
-  });
-}
-
-function helper_may(c: Ctx): string {
-  return helper(c, "may", "mu", (c, n) => {
-    const m = bind_name(c, []);
-    const alt = bind_name(c, [], [m]);
-    const v = bind_name(c, [], [m, alt]);
-    return "def " + n + "(" + m + ": Maybe<&2, U32>, " + alt + ": U32) -> U32:\n  match " + m
-      + ":\n    case None{}:\n      " + alt + "\n    case Some{" + v + "}:\n      " + v;
-  });
-}
-
 // Num
 // ---
 
@@ -1409,7 +1498,7 @@ function num_gen_u32(c: Ctx, env: V[], fuel: number): E {
     }],
     [2, () => {
       c.feat("u32-showread");
-      return e_fn(helper_may(c), e_fn("U32.read", e_fn("U32.show", num_gen_u32(c, env, fuel - 1))), num_lit_u32(c));
+      return e_fn("Maybe.default", e_atom("&2"), e_atom("U32"), e_fn("U32.read", e_fn("U32.show", num_gen_u32(c, env, fuel - 1))), num_lit_u32(c));
     }],
     [!c.pure ? 6 : 0, () => {
       c.feat("f32-conv");
@@ -1428,6 +1517,11 @@ function num_gen_u32(c: Ctx, env: V[], fuel: number): E {
     }],
     [fuel >= 2 ? 5 : 0, () => def_new(c, U32C, env, fuel) ?? num_lit_u32(c)],
     [fuel >= 2 ? 4 : 0, () => syn_call_unify(c, U32C, env, fuel) ?? num_lit_u32(c)],
+    [fuel >= 2 ? 2 : 0, () => {
+      generic_mint(c);
+      return syn_call_unify(c, U32C, env, fuel) ?? num_lit_u32(c);
+    }],
+    [fuel >= 2 ? 2 : 0, () => hof_call(c, env)],
   ])();
 }
 
@@ -1484,7 +1578,7 @@ function num_gen_f32(c: Ctx, env: V[], fuel: number): E {
     // the show/read round trip of a float (a native on every compiled lane)
     [3, () => {
       c.feat("f32-showread");
-      return e_fn(helper_mayf32(c), e_fn("F32.read", e_fn("F32.show", num_gen_f32(c, env, fuel - 1))), num_lit_f32(c, false));
+      return e_fn("Maybe.default", e_atom("&2"), e_atom("F32"), e_fn("F32.read", e_fn("F32.show", num_gen_f32(c, env, fuel - 1))), num_lit_f32(c, false));
     }],
     [34, () => {
       c.feat("f32-arith");
@@ -1665,7 +1759,7 @@ function syn_ty0(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[], qvars: strin
         // an indexed datatype takes a closed index, or a matching index term
         const iargs = (a.ips ?? []).map((ip) => a.ips !== undefined && imatch ? idx_arg(c, ip.t, ivars) : idx_lit(c, ip.t));
         // Either at &1, &1 may spell as Or(A, B)
-        const spell = a === BASE.Either && qs.every((q) => q.k === "q" && q.q === 1) && c.g.chance(0.4) ? "or" : undefined;
+        const spell = a === BASE.Either && qs.every((q) => q.k === "q" && q.q === 1) && c.g.chance(0.4) ? c.g.pick(["or", "bar"] as const) : undefined;
         if (spell !== undefined) {
           c.feat("or");
         }
@@ -1705,11 +1799,28 @@ function syn_ty0(c: Ctx, fuel: number, need: QT, tvars: TvarInfo[], qvars: strin
       const q = needData ? Q2 : pick_qt();
       return { k: "map", q, v: syn_ty(c, 0, q, tvars, qvars) } as T;
     }],
+    [c.base ? 2 : 0, () => SETC],
+    // the pairs Base's containers answer in (Array.get, swap, size, clone;
+    // Map.has, pop, get; Set.has): the container comes back beside the read
+    [c.base && fuel > 0 && !needData ? 5 : 0, () => {
+      c.feat("container-pair");
+      const el = c.g.pick([U32C, U32C, BOOLC, STRC, NATC]);
+      const q = c.g.chance(0.5) ? Q2 : Q1;
+      return c.g.pick<() => T>([
+        () => ({ k: "tup", a: { k: "arr", el }, b: el, q: 1 }),
+        () => ({ k: "tup", a: { k: "arr", el }, b: U32C, q: 1 }),
+        () => ({ k: "tup", a: { k: "arr", el }, b: { k: "arr", el }, q: 1 }),
+        () => ({ k: "tup", a: { k: "map", q, v: el }, b: BOOLC, q: 1 }),
+        () => ({ k: "tup", a: { k: "map", q, v: el }, b: t_maybe(q, el), q: 1 }),
+        () => ({ k: "tup", a: { k: "map", q: Q2, v: el }, b: el, q: 1 }),
+        () => ({ k: "tup", a: SETC, b: BOOLC, q: 1 }),
+      ])();
+    }],
     // a dependent pair: a witness, mostly an index term, and evidence about
     // it, which may be a proposition
     [c.base && fuel > 0 && !needData ? 3 : 0, () => {
       c.feat("sig");
-      const x = "w" + String(c.uid());
+      const x = bind_name(c, []);
       const a = c.g.chance(0.7) ? c.g.pick([NATC, BOOLC].concat(c.adts.filter((d) => idx_type({ k: "adt", a: d, qs: [], args: [] })).map((d): T => ({ k: "adt", a: d, qs: [], args: [] })))) : syn_ty(c, 0, Q2, tvars, qvars);
       const b = syn_ty(c, fuel - 1, Q0, tvars, qvars, idx_type(a) ? ivars.concat([{ n: x, t: a }]) : ivars, imatch, true);
       const spell = c.g.wpick<"amp" | "exists" | "sigma">([[5, "amp"], [3, "exists"], [2, "sigma"]]);
@@ -1871,8 +1982,8 @@ function fam_new(c: Ctx): Fam {
   const kind_s = qt_known(kind) === 2 ? "Data" : "Type";
   c.push("law " + name + ":\n  for " + index + ": " + ty_str(idx) + "\n  " + kind_s);
   const pred = ik === "nat" ? bind_name(c, [], [index]) : "";
-  const pats: Array<{ pat: string; sub: string | null; lit: string | null }> = ik === "nat"
-    ? [{ pat: "0n", sub: null, lit: "0n" }, { pat: "1n+" + pred, sub: pred, lit: null }]
+  const pats: Array<{ pat: string; sub: string | null; lit: string | null; src?: string }> = ik === "nat"
+    ? [{ pat: "0n", sub: null, lit: "0n" }, { pat: "1n+" + pred, sub: pred, lit: null, src: bind_name(c, [], [index, pred]) }]
     : ik === "bool" ? [{ pat: "False{}", sub: null, lit: "False{}" }, { pat: "True{}", sub: null, lit: "True{}" }]
     : (idx as Extract<T, { k: "adt" }>).a.ctors.map((ct) => ({ pat: ct.name + "{}", sub: null, lit: ct.name + "{}" }));
   for (const pt of pats) {
@@ -1896,12 +2007,12 @@ function fam_pat(arm: FamArm, rebind: boolean): string {
     return arm.pat + ":";
   }
   const pos = arm.pat.lastIndexOf(arm.sub);
-  const pat = arm.pat.slice(0, pos) + arm.sub + "0" + arm.pat.slice(pos + arm.sub.length);
+  const pat = arm.pat.slice(0, pos) + (arm.src ?? arm.sub + "0") + arm.pat.slice(pos + arm.sub.length);
   return pat + ":" + (rebind ? "\n      " + fam_rebind(arm) : "");
 }
 
 function fam_rebind(arm: FamArm): string {
-  return "+" + arm.sub + " = " + arm.sub + "0";
+  return "+" + arm.sub + " = " + (arm.src ?? arm.sub + "0");
 }
 
 // refute_ensure : def rf(e: {l == r : I}) -> Empty, for two different
@@ -1941,6 +2052,21 @@ function disc_fam(c: Ctx, idx: T, at: string): Fam {
   c.fams.push(f);
   c.push("def " + name + "(x: " + ty_str(idx) + ") -> Data:\n  match x:\n" + arms.map((arm) => "    case " + arm.pat + ":\n      " + ty_str(arm.ty)).join("\n"));
   return f;
+}
+
+// cast_ensure : def fc(-m: I, -n: I, e: {m == n : I}, w: F(m)) -> F(n), a
+// rewrite through the family with a hole motive
+function cast_ensure(c: Ctx, f: Fam): string {
+  return helper(c, "cast:" + f.name, "fc", (c, name) => {
+    const vs: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      vs.push(bind_name(c, [], vs));
+    }
+    const [m, n, e, w] = vs;
+    const I = ty_str(f.idx);
+    return "def " + name + "(-" + m + ": " + I + ", -" + n + ": " + I + ", " + e + ": {" + m + " == " + n + " : " + I + "}, "
+      + w + ": " + f.name + "(" + m + ")) -> " + f.name + "(" + n + "):\n  %" + e + " : " + f.name + "(_); " + w;
+  });
 }
 
 // mk_fam : def mk(n: I) -> F(n), the index-generic value of a family:
@@ -2287,12 +2413,21 @@ function rd_ensure(c: Ctx, t: T): string {
         const pair = bind_name(c, []);
         const array = bind_name(c, [], [pair]);
         const size = bind_name(c, [], [pair, array]);
-        c.push("def " + name + "b(" + pair + ": " + ty_str(t) + " & U32) -> U32:\n  (" + array + ", " + size + ") = " + pair + "\n  (" + size + " + " + salt() + " : U32)");
-        return def1(arg + ": " + ty_str(t), name + "b(Array.size(" + ty_grp(t.el) + ", " + arg + "))");
+        const sized = decl_name(c, "rb");
+        c.push("def " + sized + "(" + pair + ": " + ty_str(t) + " & U32) -> U32:\n  (" + array + ", " + size + ") = " + pair + "\n  (" + size + " + " + salt() + " : U32)");
+        return def1(arg + ": " + ty_str(t), sized + "(Array.size(" + ty_grp(t.el) + ", " + arg + "))");
       }
       case "unit": return def1(arg + ": Unit", "match " + arg + ":\n    case Unit{}:\n      " + salt());
+      case "set": return def1(arg + ": Set()", "(U32.from_nat(Set.size(" + arg + ")) + " + salt() + " : U32)");
       case "tup": {
-        return def1(arg + ": " + ty_str(t), "(ta, tb) = " + arg + "\n  (" + rd_call(c, t.a, "ta") + " + " + rd_call(c, t.b, "tb") + " : U32)");
+        // a + on a destructured Data component re-binds it reusable
+        const plus = ty_data(t.a) && c.g.chance(0.3);
+        if (plus) {
+          c.feat("plus-tup");
+        }
+        const ta = bind_name(c, [], [arg]);
+        const tb = bind_name(c, [], [arg, ta]);
+        return def1(arg + ": " + ty_str(t), "(" + (plus ? "+" : "") + ta + ", " + tb + ") = " + arg + "\n  (" + rd_call(c, t.a, ta) + " + " + rd_call(c, t.b, tb) + " : U32)");
       }
       case "fun": {
         if (!ty_inh(t.dom)) {
@@ -2319,7 +2454,8 @@ function rd_ensure(c: Ctx, t: T): string {
         // the witness re-binds reusable: read on its own, added into the
         // evidence's read, and named in the evidence's type
         const ra = rd_call(c, t.a, t.x);
-        return def1(arg + ": " + ty_str(t), "(" + (idx_type(t.a) ? "+" : "") + t.x + ", e) = " + arg + "\n  " + rd_arm(c, t.b, "e", "  ", null, ra));
+        const ev = bind_name(c, [], [arg, t.x]);
+        return def1(arg + ": " + ty_str(t), "(" + (idx_type(t.a) ? "+" : "") + t.x + ", " + ev + ") = " + arg + "\n  " + rd_arm(c, t.b, ev, "  ", null, ra));
       }
       case "adt": return rd_adt(c, name, t);
       default: return def1(arg + ": " + ty_str(t), salt());
@@ -2491,8 +2627,8 @@ function tf_ensure(c: Ctx, t: Extract<T, { k: "adt" }>): string {
 // here is a checked position.
 
 function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
-  if (fuel > 0 && !ty_open(goal) && c.g.chance(SURFACE_PCT / 100)) {
-    const form = c.g.pick(c.base ? [0, 1, 2, 3, 4, 5] : [0, 1, 4, 5]);
+  if (fuel > 0 && !ty_open(goal) && c.g.chance(c.s.surface)) {
+    const form = c.g.pick(c.base && !c.s.tmpl ? [0, 1, 2, 3, 4, 5] : c.base ? [0, 1, 3, 4, 5] : [0, 1, 4, 5]);
     const ty = ty_str(goal);
     const name = "sx" + String(c.uid());
     if (form === 0) {
@@ -2565,6 +2701,13 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
   const var_w = direct.length > 0 ? 30 : 0;
   const pick_var = (): E => e_atom(env_take(c.g.pick(direct)));
   const uni = (): E | null => fuel >= 1 ? syn_call_unify(c, goal, env, fuel) : null;
+  // any goal may be a call of a registered def (a minted one or Base's)
+  if (fuel >= 1 && c.g.chance(0.06)) {
+    const got = uni();
+    if (got !== null) {
+      return got;
+    }
+  }
   switch (goal.k) {
     case "u32": return num_gen_u32(c, env, fuel);
     case "f32": return num_gen_f32(c, env, fuel);
@@ -2579,18 +2722,9 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         [20, () => e_atom(c.g.pick(["True{}", "False{}"]))],
         [fuel > 0 ? 12 : 0, () => e_fn("U32." + c.g.pick(["is_eq", "is_ne", "is_lt", "is_le", "is_gt", "is_ge"]), num_gen_u32(c, env, fuel - 1), num_gen_u32(c, env, fuel - 1))],
         [fuel > 0 ? 3 : 0, () => e_fn("U32.is_zero", num_gen_u32(c, env, fuel - 1))],
-        [fuel > 0 ? 8 : 0, () => {
-          c.feat("bool-ops");
-          const op = c.g.pick(["Bool.and", "Bool.or", "Bool.xor"]);
-          return e_fn(op, syn(c, BOOLC, env, fuel - 1), syn(c, BOOLC, env, fuel - 1));
-        }],
         [fuel > 0 ? 5 : 0, () => e_bin(syn(c, BOOLC, env, fuel - 1), c.g.pick(["&&", "||"]), syn(c, BOOLC, env, fuel - 1))],
-        [fuel > 0 ? 4 : 0, () => e_fn("Bool.not", syn(c, BOOLC, env, fuel - 1))],
         [fuel > 0 ? 4 : 0, () => e_fn("Nat.is_lt", num_gen_nat(c, env, fuel - 1), num_gen_nat(c, env, fuel - 1))],
-        [fuel > 0 ? 4 : 0, () => {
-          c.feat("string-eq");
-          return e_fn("String.eq", syn(c, STRC, env, fuel - 1), syn(c, STRC, env, fuel - 1));
-        }],
+        [fuel > 0 ? 12 : 0, () => uni() ?? e_atom("True{}")],
         [fuel > 0 && !c.pure ? 5 : 0, () => e_bin(num_gen_f32(c, env, fuel - 1), c.g.pick(["==.", "!=.", "<.", "<=.", ">.", ">=."]), num_gen_f32(c, env, fuel - 1))],
       ])();
     }
@@ -2600,7 +2734,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         [15, () => e_atom(c.g.pick(["LT{}", "EQ{}", "GT{}"]))],
         [fuel > 0 ? 15 : 0, () => e_fn("U32.cmp", num_gen_u32(c, env, fuel - 1), num_gen_u32(c, env, fuel - 1))],
         [fuel > 0 ? 6 : 0, () => e_fn("Nat.cmp", num_gen_nat(c, env, fuel - 1), num_gen_nat(c, env, fuel - 1))],
-        [fuel > 0 ? 5 : 0, () => e_fn("Bool.cmp", syn(c, BOOLC, env, fuel - 1), syn(c, BOOLC, env, fuel - 1))],
+        [fuel > 0 ? 5 : 0, () => uni() ?? e_atom("EQ{}")],
       ])();
     }
     case "char": {
@@ -2608,6 +2742,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         [var_w, pick_var],
         [25, () => e_atom("'" + str_char(c) + "'")],
         [fuel > 0 ? 8 : 0, () => e_atom("Chr{" + e_at(e_bin(num_gen_u32(c, env, fuel - 1), "%", e_atom("55000"))) + "}")],
+        [fuel > 0 ? 6 : 0, () => uni() ?? e_atom("'a'")],
       ])();
     }
     case "str": {
@@ -2627,6 +2762,14 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
           return e_fn("F32.show", num_gen_f32(c, env, fuel - 1));
         }],
         [fuel >= 2 ? 4 : 0, () => def_new(c, goal, env, fuel - 1) ?? e_atom(str_lit(c, 3))],
+        [fuel > 0 ? 10 : 0, () => uni() ?? e_atom(str_lit(c, 2))],
+      ])();
+    }
+    case "set": {
+      return c.g.wpick<() => E>([
+        [var_w, pick_var],
+        [10, () => e_atom("Set.new()")],
+        [fuel > 0 ? 30 : 0, () => uni() ?? e_atom("Set.new()")],
       ])();
     }
     case "tvar": {
@@ -2661,14 +2804,28 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
       const intro = (): E => e_atom("(" + e_at(syn(c, goal.a, env, Math.max(0, fuel - 1))) + ", " + e_at(syn(c, goal.b, env, Math.max(0, fuel - 1))) + ")");
       // an array read or measured: the array comes back beside the word
       const arrs = goal.a.k === "arr" && goal.b.k === "u32" && goal.q === 1 ? env.filter((v) => v.q !== "dead" && ty_eq(v.ty, goal.a)) : [];
+      // a container beside its read comes back from the container's op
+      const container = goal.a.k === "arr" || goal.a.k === "map" || goal.a.k === "set";
+      const u32arr = goal.a.k === "arr" && goal.a.el.k === "u32" && goal.b.k === "u32";
       return c.g.wpick<() => E>([
         [var_w, pick_var],
         [30, intro],
-        [8, () => uni() ?? intro()],
+        [container ? 60 : 8, () => uni() ?? intro()],
+        // the index sugar a[i] reads a U32 array, any array term
+        [u32arr && fuel > 0 ? 15 : 0, () => {
+          c.feat("array-sugar");
+          return e_atom(e_at(syn(c, goal.a, env, fuel - 1)) + "[" + num_gen_u32(c, env, 0).s + "]");
+        }],
         [arrs.length > 0 ? 40 : 0, () => {
           c.feat("array-ops");
-          const a = e_atom(env_take(c.g.pick(arrs)));
-          return c.g.chance(0.7) ? e_fn("Array.get", e_atom("U32"), a, num_gen_u32(c, env, 0)) : e_fn("Array.size", e_atom("U32"), a);
+          const a = env_take(c.g.pick(arrs));
+          const el = (goal.a as Extract<T, { k: "arr" }>).el;
+          if (el.k !== "u32" || c.g.chance(0.3)) {
+            return e_fn("Array.size", e_atom(ty_grp(el)), e_atom(a));
+          }
+          // the index sugar a[i] reads a U32 array
+          c.feat("array-sugar");
+          return c.g.chance(0.5) ? e_fn("Array.get", e_atom("U32"), e_atom(a), num_gen_u32(c, env, 0)) : e_atom(a + "[" + num_gen_u32(c, env, 0).s + "]");
         }],
         [fuel >= 2 ? 5 : 0, () => def_new(c, goal, env, fuel - 1) ?? intro()],
       ])();
@@ -2717,7 +2874,7 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
         // argument (deeper partials die in js_book)
         [fuel >= 1 && goal.q === 1 ? 15 : 0, () => {
           const cands = c.defr.filter((d) =>
-            d.wip === undefined && d.qps.length === 0 && d.tps.length === 0 && d.ps.length >= 1
+            d.wip === undefined && d.qps.length === 0 && d.tps.length === 0 && (d.tm ?? 0) === 0 && d.ps.length >= 1
             && ty_eq(d.ps[d.ps.length - 1].t, goal.dom) && ty_eq(d.ret, goal.cod)
             && d.ps[d.ps.length - 1].q === 1
             && (d.mask?.[d.ps.length - 1] ?? null) === null);
@@ -2771,21 +2928,14 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
           }
           // a chain a <> b <> [..] ends in a list literal; a lambda head
           // would swallow the chain as its body
-          const heads = n > 0 && goal.args[0].k !== "fun" && c.g.chance(0.3) ? 1 + c.g.int(Math.min(n, 3)) : 0;
+          const el = goal.args[0].k === "app" ? fam_unfold(goal.args[0].f, goal.args[0].arg) ?? goal.args[0] : goal.args[0];
+          const heads = n > 0 && el.k !== "fun" && goal.args[0].k !== "fun" && c.g.chance(0.3) ? 1 + c.g.int(Math.min(n, 3)) : 0;
           if (heads > 0) {
             c.feat("cons-lit");
           }
           return e_atom(els.slice(0, heads).map((e) => e + " <> ").join("") + "[" + els.slice(heads).join(", ") + "]");
         }],
         [c.base && a.rec && fuel > 0 && !ty_open(goal) ? 20 : 0, () => builder_call(c, goal as Extract<T, { k: "adt" }>, env, c.pure ? 10 : 16)],
-        // List.map is a template over its element types and its function
-        [is_list && fuel > 0 && !ty_open(goal) && goal.qs[0].k === "q" && goal.qs[0].q === 1 ? 6 : 0, () => {
-          c.feat("list-map");
-          const src = c.g.pick([U32C, BOOLC, NATC]);
-          const y = bind_name(c, env);
-          const body = e_at(syn(c, goal.args[0], [v_new(y, src)], Math.max(0, fuel - 1)));
-          return e_atom("List.map(~" + ty_grp(src) + ", ~" + ty_grp(goal.args[0]) + ", ~(" + y + " => " + body + "), " + e_at(syn(c, t_list(Q1, src), env, fuel - 1)) + ")");
-        }],
         [!ty_open(goal) && fuel >= 1 ? 6 : 0, () => {
           c.feat("reuse");
           return e_atom(tf_ensure(c, goal as Extract<T, { k: "adt" }>) + "(" + e_at(syn(c, goal, env, Math.max(0, fuel - 1))) + ")");
@@ -2797,19 +2947,37 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
     case "arr": {
       // arrays are linear: a fresh one, or one in scope written at an index
       const arrs = env.filter((v) => v.q !== "dead" && ty_eq(v.ty, goal));
+      // a fresh one: Array.new, or a literal by depth ([v : T^d]) or by a
+      // power-of-two slot count ([v : T*n]); its fill value is Data
       const fresh = (): E => {
         c.feat("array-ops");
-        const d = 1 + c.g.int(3);
-        return c.g.chance(0.5)
-          ? e_fn("Array.new", e_atom(ty_grp(goal.el)), e_atom(String(d) + "n"), syn(c, goal.el, env, 0))
-          : e_atom("[" + e_at(syn(c, goal.el, env, 0)) + " : " + ty_grp(goal.el) + "^" + String(d) + "n]");
+        const d = size_pick(c, 1 + c.g.int(3), c.pure ? 6 : 12);
+        const v = e_at(syn(c, goal.el, env.filter((w) => w.q === "many"), 0));
+        const how = c.g.int(3);
+        if (how > 0) {
+          c.feat("array-lit");
+        }
+        return how === 0 ? e_fn("Array.new", e_atom(ty_grp(goal.el)), e_atom(String(d) + "n"), e_atom(v))
+          : e_atom("[" + v + " : " + ty_grp(goal.el) + (how === 1 ? "^" + String(d) : "*" + String(2 ** d)) + "n]");
       };
       return c.g.wpick<() => E>([
         [var_w, pick_var],
-        [30, fresh],
+        [ty_data(goal.el) ? 30 : 0, fresh],
         [arrs.length > 0 && fuel > 0 ? 30 : 0, () => {
           c.feat("array-write");
-          return e_fn("Array.set", e_atom(ty_grp(goal.el)), e_atom(env_take(c.g.pick(arrs))), num_gen_u32(c, env, 0), syn(c, goal.el, env, Math.max(0, fuel - 1)));
+          const a = env_take(c.g.pick(arrs));
+          const i = num_gen_u32(c, env, 0);
+          const v = syn(c, goal.el, env, Math.max(0, fuel - 1));
+          // the write sugar a[i] <- v sets a U32 array
+          return goal.el.k === "u32" && c.g.chance(0.5) ? e_atom("(" + a + "[" + i.s + "] <- " + e_at(v) + ")")
+            : e_fn("Array.set", e_atom(ty_grp(goal.el)), e_atom(a), i, v);
+        }],
+        [fuel > 0 ? 20 : 0, () => {
+          const got = uni();
+          if (got === null && !ty_data(goal.el)) {
+            throw new Error("no array of " + ty_str(goal.el));
+          }
+          return got ?? fresh();
         }],
       ])();
     }
@@ -2836,9 +3004,9 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
       }
       return c.g.wpick<() => E>([
         [var_w, pick_var],
-        [arm !== null && fuel > 0 ? 20 : 0, () => {
+        [arm !== null ? 20 : 0, () => {
           c.feat("fam-unfold");
-          return syn(c, arm as T, env, fuel - 1);
+          return syn(c, arm as T, env, Math.max(0, fuel - 1));
         }],
         [canMk ? 20 : 0, () => {
           const mk = inMk ? c.memo.get(mkKey) as string : mk_fam(c, goal.f);
@@ -2849,6 +3017,13 @@ function syn(c: Ctx, goal: T, env: V[], fuel: number): E {
           const mk = inMk ? c.memo.get(mkKey) as string : mk_fam(c, goal.f);
           return uni() ?? e_call("", mk + "(" + goal.arg + ")");
         }],
+        // a value moved across the reflexive index equation: the
+        // hole-motive transport, Word.cast's shape
+        [total && fuel > 0 ? 5 : 0, () => {
+          c.feat("fam-cast");
+          const cast = cast_ensure(c, goal.f);
+          return e_call(cast, cast + "(" + goal.arg + ", " + goal.arg + ", {==}, " + e_at(syn(c, goal, env, fuel - 1)) + ")");
+        }],
       ])();
     }
   }
@@ -2858,6 +3033,17 @@ function syn_def_arg(c: Ctx, d: DefR, i: number, t: T, env: V[], fuel: number): 
   const mask = d.mask?.[i] ?? null;
   if (mask !== null && t.k === "nat") {
     return "U32.to_nat((" + e_at(num_gen_u32(c, env, fuel)) + " % " + String(mask) + " : U32))";
+  }
+  // a template's argument is closed: nothing in scope reaches it
+  if (d.qps.length + d.tps.length + i < (d.tm ?? 0)) {
+    c.feat("template-arg");
+    const was = c.s.tmpl;
+    c.s.tmpl = true;
+    try {
+      return e_at(syn(c, t, [], Math.max(1, fuel)));
+    } finally {
+      c.s.tmpl = was;
+    }
   }
   const fenv = d.ps[i].q === 1 ? env : env.filter((v) => v.q === "many");
   const e = syn(c, t, fenv, fuel);
@@ -2930,6 +3116,10 @@ function syn_def_args(c: Ctx, d: DefR, env: V[], fuel: number): string[] | null 
       return null;
     }
   }
+  // twins: one reusable value passed as two arguments
+  if (new Set(args).size < args.length && args.some((a, j) => /^[A-Za-z_]\w*$/.test(a) && args.indexOf(a) !== j)) {
+    c.feat("twins");
+  }
   return args;
 }
 
@@ -2950,7 +3140,10 @@ function syn_call_unify(c: Ctx, goal: T, env: V[], fuel: number): E | null {
   if (cands.length === 0) {
     return null;
   }
-  const { d, m, qm } = c.g.pick(cands);
+  // Base's defs and the program's own share the draw evenly
+  const own = cands.filter((x) => x.d.base !== true);
+  const base = cands.filter((x) => x.d.base === true);
+  const { d, m, qm } = c.g.pick(own.length === 0 ? base : base.length === 0 || c.g.chance(0.5) ? own : base);
   for (const qp of d.qps) {
     if (!qm.has(qp)) {
       qm.set(qp, c.g.chance(0.5) ? Q1 : Q2);
@@ -2966,7 +3159,9 @@ function syn_call_unify(c: Ctx, goal: T, env: V[], fuel: number): E | null {
   if (ps.some((p) => (p.q === 2 && !ty_data(p.t)) || ty_open(p.t))) {
     return null;
   }
-  if (d.qps.length > 0) {
+  if (d.base === true) {
+    c.feat("base:" + d.name);
+  } else if (d.qps.length > 0) {
     c.feat("qpoly-call");
   } else if (d.tps.length > 0) {
     c.feat("generic-call");
@@ -2975,9 +3170,13 @@ function syn_call_unify(c: Ctx, goal: T, env: V[], fuel: number): E | null {
   if (args === null) {
     return null;
   }
-  const qargs = d.qps.map((qp) => qt_str(qm.get(qp) as QT));
-  const targs = d.tps.map((tp) => ty_grp(m.get(tp.n) as T));
-  return e_call(d.name, d.name + "(" + qargs.concat(targs, args).join(", ") + ")");
+  const head = (d.hdr ?? [...d.qps, ...d.tps.map((tp) => tp.n)])
+    .map((n) => d.qps.includes(n) ? qt_str(qm.get(n) as QT) : ty_grp(m.get(n) as T));
+  if ((d.tm ?? 0) > 0) {
+    c.feat("template");
+  }
+  const all = head.concat(args).map((a, i) => i < (d.tm ?? 0) ? "~" + a : a);
+  return e_call(d.name, d.name + "(" + all.join(", ") + ")");
 }
 
 // Defs
@@ -3405,44 +3604,79 @@ function generic_mint(c: Ctx): void {
   c.defr.push({ name, qps: qps.slice(0, nq), tps, ps: [{ q: 1, t: et }], ret: rt });
 }
 
-// Equality and rewrites
-// ---------------------
-// let_eql : an equality binding proved by {==} over identical renderings
-// of one synthesized side; consumed by a constant-motive rewrite or left
-// bound. Axiom asserts (bodiless) are referenced only from erased lets —
-// a live reference to an unfilled assert is refused, and a live rewrite
-// on one would wedge the interpreter.
+// Statements
+// ----------
+// A result or extra def is a run of statements, each binding names the fold
+// reads. Three productions make them: a value of any type, read to a U32
+// through its reader (a U32 is its own reading, a call may carry a `!`
+// mark); a parallel let, the one fork shape; and a proof, an equation
+// rewritten on or left bound. Arrays, maps, sets, floats, shared values and
+// calls are values of some type: Base's own Array.*, Map.*, Set.* and List.*
+// defs reach them through the registry, so no container has a kit of its
+// own.
 
 type Line = { text: string; binds: string[]; vars: V[] };
 
-function let_eql(c: Ctx, env: V[]): Line {
-  c.feat("eql");
-  // This proof binder is internal to the statement. It must not shadow a
-  // value that later statements still fold.
-  const x = bind_name(c, []);
-  const menv = env.filter((v) => v.q === "many");
-  const t = c.g.pick([U32C, NATC, BOOLC]);
-  const sideE = syn(c, t, menv, 1);
-  const side = sideE.p === 99 ? sideE.s : "(" + sideE.s + ")";
-  const ety = "{" + side + " == " + side + " : " + ty_str(t) + "}";
-  const lines: string[] = [x + " = {{==} : " + ety + "}"];
-  const binds: string[] = [];
-  const vars: V[] = [];
-  if (c.g.chance(0.5)) {
-    c.feat("rwt");
-    const w = bind_name(c, env, [x]);
-    lines.push("%" + x + " : U32;");
-    lines.push(w + " = " + u32_rhs(num_gen_u32(c, env, 1)));
-    binds.push(w);
+// let_value : a value of a drawn type bound (annotated: an intro-headed
+// value does not infer in a bare let) and read; a Data value may stay in
+// scope under a + binder, read twice, or be rebuilt through a same-ctor
+// transform first
+function let_value(c: Ctx, env: V[]): Line {
+  const t = c.g.wpick<() => T>([
+    [c.base ? 30 : 0, () => U32C],
+    [c.base && !c.pure ? 30 : 0, () => F32C],
+    [40, () => syn_ty(c, size_pick(c, 2, 5), Q0, [], [])],
+  ])();
+  const x = bind_name(c, env);
+  if (t.k === "u32") {
+    const e = c.g.chance(0.4) ? def_call(c, U32C, env, 2) ?? num_gen_u32(c, env, 2) : num_gen_u32(c, env, 2 + c.g.int(3));
+    const bang = e.head !== undefined && e.s.startsWith(e.head + "(") ? gpu_mark(c) : "";
+    const s = bang === "" ? e : e_atom((e.head as string) + bang + e.s.slice((e.head as string).length));
+    const keep = bind_keep(c);
+    return { text: (keep ? "+" : "") + x + " = " + u32_rhs(s), binds: [x], vars: keep ? [v_new(x, U32C, true)] : [] };
   }
-  return { text: lines.join("\n  "), binds, vars };
+  c.feat(t.k === "fun" ? "clo" : t.k === "f32" ? "f32" : "value");
+  const y = bind_name(c, env, [x]);
+  const val = c.g.chance(0.3) ? def_new(c, t, env, 2) ?? syn(c, t, env, 2) : syn(c, t, env, 2 + c.g.int(2));
+  const keep = ty_data(t) && c.g.chance(0.4);
+  const kind = c.g.wpick<string>([
+    [50, "plain"],
+    [t.k === "adt" && !ty_open(t) ? 20 : 0, "tf"],
+    [keep ? 15 : 0, "twice"],
+  ]);
+  const rd = rd_ensure(c, t);
+  const ykeep = bind_keep(c);
+  const lines: string[] = [(keep ? "+" : "") + x + " = {" + val.s + " : " + ty_top(t) + "}"];
+  if (kind === "tf") {
+    c.feat("reuse");
+    lines.push((ykeep ? "+" : "") + y + " = " + rd + "(" + tf_ensure(c, t as Extract<T, { k: "adt" }>) + "(" + x + "))");
+  } else if (kind === "twice") {
+    c.feat("dup");
+    lines.push((ykeep ? "+" : "") + y + " = (" + rd + "(" + x + ") + " + rd + "(" + x + ") : U32)");
+  } else {
+    lines.push((ykeep ? "+" : "") + y + " = " + rd + "(" + x + ")");
+  }
+  const vars = ykeep ? [v_new(y, U32C, true)] : [];
+  if (keep && kind !== "twice") {
+    vars.push(v_new(x, t, true));
+  }
+  return { text: lines.join("\n  "), binds: [y], vars };
 }
 
-// theorem_gen : a minted Nat clone with a generated op (op(z,b) = S^k(b),
-// op(s{p},b) = S^m(op(p,b))) and its shift law, proved by two-line
-// induction; the equation then rides the Equal kit (cong/sym/trans) or a
-// direct constant-motive rewrite on the critical path.
-function theorem_gen(c: Ctx, env: V[]): Line {
+// Proofs
+// ------
+// let_proof : an equation bound by a proof term, then rewritten on with a
+// constant motive (%x : U32;) or left bound. The proof grammar composes:
+// reflexivity over a side drawn from reusable binders only (it is written
+// twice), Base's U32.add_comm, a minted theorem (a Nat clone's shift law
+// proved by induction), and Equal's sym, cong and trans over any of them.
+
+type Prf = { s: string; t: string; a: string; b: string; ap?: (x: string) => string };
+
+// theorem : a minted Nat clone, an op on it (op(z, b) = S^k(b), op(s{p}, b)
+// = S^m(op(p, b))) and its shift law op(a, S{b}) == S{op(a, b)}, proved by
+// induction, its inductive arm rewriting with the hypothesis
+function theorem(c: Ctx): Prf {
   c.feat("thm");
   const id = String(c.uid());
   const N = "Nt" + id;
@@ -3461,227 +3695,68 @@ function theorem_gen(c: Ctx, env: V[]): Line {
   c.push("def " + add + "(a: " + N + ", b: " + N + ") -> " + N + ":\n  match a:\n    case " + Z + "{}:\n      "
     + wrap(k, "b") + "\n    case " + S + "{p}:\n      " + wrap(m, add + "(p, b)"));
   const th = "th" + id;
-  // shift law: op(a, S{b}) == S{op(a, b)}. The inductive arm rewrites
-  // with the IH: motive marks the S{op(p,b)} occurrence as S{_}.
   c.push("def " + th + "(a: " + N + ", -b: " + N + ") -> {" + add + "(a, " + S + "{b}) == " + S + "{" + add + "(a, b)} : " + N + "}:\n"
     + "  match a:\n    case " + Z + "{}:\n      {==}\n    case " + S + "{p}:\n      %" + th + "(p, b) : {"
     + wrap(m, add + "(p, " + S + "{b})") + " == " + wrap(m - 1, S + "{_}") + " : " + N + "};\n      {==}");
-  // use the theorem live: bind nats, rewrite with a constant motive
-  let id2 = String(c.uid());
-  while (c.names.has("na" + id2) || c.names.has("nb" + id2)) id2 = String(c.uid());
-  const na = "na" + id2;
-  const nb = "nb" + id2;
-  c.names.add(na);
-  c.names.add(nb);
-  const w = bind_name(c, env);
-  const depth = 1 + c.g.int(3);
-  const lines = [
-    na + " = {" + wrap(depth, Z + "{}") + " : " + N + "}",
-    nb + " = {" + wrap(c.g.int(2), Z + "{}") + " : " + N + "}",
-    "%" + th + "(" + na + ", " + nb + ") : U32;",
-    w + " = " + u32_rhs(num_gen_u32(c, env, 1)),
-  ];
-  return { text: lines.join("\n  "), binds: [w], vars: [] };
+  const a = wrap(1 + c.g.int(3), Z + "{}");
+  const b = wrap(c.g.int(2), Z + "{}");
+  return { s: th + "(" + a + ", " + b + ")", t: N, a: add + "(" + a + ", " + S + "{" + b + "})", b: S + "{" + add + "(" + a + ", " + b + ")}",
+    ap: (x) => S + "{" + x + "}" };
 }
 
-// eqkit : Equal.cong / sym / trans over base's own proofs
-function let_eqkit(c: Ctx, env: V[]): Line {
-  c.feat("eqkit");
-  const id = String(c.uid());
-  const x = "qa" + id;
-  const w = bind_name(c, env, [x]);
-  const a = num_lit_u32(c);
-  const b = num_lit_u32(c);
-  const e0 = "U32.add_comm(" + a.s + ", " + b.s + ")";
-  const az = "U32.add(" + a.s + ", " + b.s + ")";
-  const za = "U32.add(" + b.s + ", " + a.s + ")";
-  const eq = c.g.wpick<string>([
-    [3, e0],
-    [2, "Equal.sym(U32, " + az + ", " + za + ", " + e0 + ")"],
-    [2, "Equal.cong(U32, U32, w" + id + " => U32.inc(w" + id + "), " + az + ", " + za + ", " + e0 + ")"],
-    [1, "Equal.trans(U32, " + az + ", " + za + ", " + za + ", " + e0 + ", {==})"],
-  ]);
-  const lines = [
-    x + " = " + eq,
-    "%" + x + " : U32;",
-    w + " = " + u32_rhs(num_gen_u32(c, env, 1)),
-  ];
-  return { text: lines.join("\n  "), binds: [w], vars: [] };
+function proof(c: Ctx, env: V[], depth: number): Prf {
+  if (depth > 0 && c.g.chance(0.5)) {
+    const p = proof(c, env, depth - 1);
+    return c.g.wpick<() => Prf>([
+      [3, () => {
+        c.feat("eq-sym");
+        return { ...p, s: "Equal.sym(" + p.t + ", " + p.a + ", " + p.b + ", " + p.s + ")", a: p.b, b: p.a };
+      }],
+      [p.ap !== undefined ? 3 : 0, () => {
+        c.feat("eq-cong");
+        const w = "w" + String(c.uid());
+        const f = p.ap as (x: string) => string;
+        return { ...p, s: "Equal.cong(" + p.t + ", " + p.t + ", " + w + " => " + f(w) + ", " + p.a + ", " + p.b + ", " + p.s + ")", a: f(p.a), b: f(p.b) };
+      }],
+      [2, () => {
+        c.feat("eq-trans");
+        return { ...p, s: "Equal.trans(" + p.t + ", " + p.a + ", " + p.b + ", " + p.b + ", " + p.s + ", {==})" };
+      }],
+    ])();
+  }
+  return c.g.wpick<() => Prf>([
+    [4, () => {
+      c.feat("eql");
+      const t = c.g.pick([U32C, NATC, BOOLC]);
+      const side = e_at(syn(c, t, env.filter((v) => v.q === "many"), 1));
+      const ap = t.k === "u32" ? (x: string) => "U32.inc(" + x + ")" : t.k === "nat" ? (x: string) => "Nat.double(" + x + ")" : (x: string) => "Bool.not(" + x + ")";
+      return { s: "{==}", t: ty_str(t), a: side, b: side, ap };
+    }],
+    [3, () => {
+      c.feat("eqkit");
+      const a = num_lit_u32(c).s;
+      const b = num_lit_u32(c).s;
+      return { s: "U32.add_comm(" + a + ", " + b + ")", t: "U32", a: "U32.add(" + a + ", " + b + ")", b: "U32.add(" + b + ", " + a + ")",
+        ap: (x) => "(" + x + " + " + b + " : U32)" };
+    }],
+    [2, () => theorem(c)],
+  ])();
 }
 
-// Array kit
-// ---------
-// Arrays are linear (Type kind): the kit threads one array through
-// new/set/swap/get/size/clone inside a single minted def, using the
-// a[i] / a[i] <- v sugar where it applies. Element reads return pairs, so
-// each step chains through a continuation def — minted flat here as a
-// state-machine of helper defs, base.bend style.
-
-function let_array(c: Ctx, env: V[]): Line {
-  c.feat("array-ops");
-  const name = decl_name(c, "aru");
-  const depth = c.pure ? 2 + c.g.int(3) : 3 + c.g.int(9);
-  const elu32 = c.pure || c.g.chance(0.7);
-  const x = bind_name(c, env);
-  if (elu32) {
-    c.feat("array-sugar");
-    // U32 elements: get/swap/size/clone all legal. Every pair-returning
-    // op chains through its own continuation def (params destructure,
-    // computed values do not).
-    const clone = c.g.chance(0.4);
-    const k1 = decl_name(c, "ak");
-    const k2 = decl_name(c, "ah");
-    if (clone) {
-      c.feat("array-clone");
-      const k3 = decl_name(c, "ac");
-      const r3 = bind_name(c, []), n3 = bind_name(c, [], [r3]);
-      const a3 = bind_name(c, [], [r3, n3]), w3 = bind_name(c, [], [r3, n3, a3]);
-      c.push("def " + k3 + "(" + r3 + ": Array<U32> & U32, +" + n3 + ": U32) -> U32:\n  (" + a3 + ", " + w3 + ") = " + r3 + "\n  (" + w3 + " + " + n3 + " : U32)");
-      const k2b = decl_name(c, "ahb");
-      const rb = bind_name(c, []), cb = bind_name(c, [], [rb]);
-      const ab = bind_name(c, [], [rb, cb]), nb = bind_name(c, [], [rb, cb, ab]);
-      const n2 = bind_name(c, [], [rb, cb, ab, nb]);
-      c.push("def " + k2b + "(" + rb + ": Array<U32> & U32, " + cb + ": Array<U32>) -> U32:\n  (" + ab + ", " + nb + ") = " + rb + "\n  +" + n2 + " = " + nb + "\n  " + k3 + "(Array.get(U32, " + cb + ", " + n2 + "), " + n2 + ")");
-      const r2 = bind_name(c, []), b2 = bind_name(c, [], [r2]), c2 = bind_name(c, [], [r2, b2]);
-      c.push("def " + k2 + "(" + r2 + ": Array<U32> & Array<U32>) -> U32:\n  (" + b2 + ", " + c2 + ") = " + r2 + "\n  " + k2b + "(Array.size(U32, " + b2 + "), " + c2 + ")");
-    } else {
-      const r2 = bind_name(c, []), a2 = bind_name(c, [], [r2]), n2 = bind_name(c, [], [r2, a2]);
-      c.push("def " + k2 + "(" + r2 + ": Array<U32> & U32) -> U32:\n  (" + a2 + ", " + n2 + ") = " + r2 + "\n  (" + n2 + " + " + String(c.g.int(64)) + " : U32)");
-    }
-    const k2call = clone
-      ? (a: string): string => k2 + "(Array.clone(U32, " + a + "))"
-      : (a: string): string => k2 + "(Array.size(U32, " + a + "))";
-    // a + on a tuple let's component re-binds it reusable ((a, +old) = r)
-    const ptup = c.g.chance(0.4);
-    if (ptup) {
-      c.feat("plus-tup");
-    }
-    const r1 = bind_name(c, []), i1 = bind_name(c, [], [r1]);
-    const a1 = bind_name(c, [], [r1, i1]), old = bind_name(c, [], [r1, i1, a1]);
-    c.push("def " + k1 + "(" + r1 + ": Array<U32> & U32, +" + i1 + ": U32) -> U32:\n  (" + a1 + ", " + (ptup ? "+" : "") + old + ") = " + r1 + "\n  (" + old + " + "
-      + (ptup ? old + " + " : "") + k2call(a1) + " : U32)");
-    // the array as a literal ([s : U32*n] a power-of-two count, [s : U32^d]
-    // a depth) or Array.new; the write as the statement a[i] <- v or a let
-    const lit = c.g.wpick<string>([[4, "new"], [3, "count"], [3, "depth"]]);
-    if (lit !== "new") {
-      c.feat("array-lit");
-    }
-    const index = bind_name(c, []), seed = bind_name(c, [], [index]);
-    const a0 = bind_name(c, [], [index, seed]), a1m = bind_name(c, [], [index, seed, a0]);
-    const mk = lit === "count" ? "[" + seed + " : U32*" + String(2 ** depth) + "n]"
-      : lit === "depth" ? "[" + seed + " : U32^" + String(depth) + "n]" : "Array.new(U32, " + String(depth) + "n, " + seed + ")";
-    const wstmt = c.g.chance(0.5);
-    if (wstmt) {
-      c.feat("array-write");
-    }
-    c.push("def " + name + "(+" + index + ": U32, +" + seed + ": U32) -> U32:\n"
-      + "  " + a0 + " = " + mk + "\n"
-      + (wstmt ? "  " + a0 + "[" + index + "] <- (" + seed + " * 3 + 1 : U32)\n" : "  " + a1m + " = " + a0 + "[" + index + "] <- (" + seed + " * 3 + 1 : U32)\n")
-      + "  " + k1 + "(Array.swap(U32, " + (wstmt ? a0 : a1m) + ", (" + index + " + 1 : U32), (" + seed + " .^. 255 : U32)), " + index + ")");
-    c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: U32C }, { q: 2, t: U32C }], ret: U32C });
-    const keep = bind_keep(c);
-    return {
-      text: (keep ? "+" : "") + x + " = " + name + "(" + e_at(num_gen_u32(c, env, 1)) + ", " + e_at(num_gen_u32(c, env, 1)) + ")",
-      binds: [x], vars: keep ? [v_new(x, U32C, true)] : [],
-    };
+function let_proof(c: Ctx, env: V[]): Line {
+  // the proof binder is internal to the statement: it must not shadow a
+  // value that later statements still fold
+  const x = bind_name(c, []);
+  const p = proof(c, env, 2);
+  const lines = [x + " = {" + p.s + " : {" + p.a + " == " + p.b + " : " + p.t + "}}"];
+  const binds: string[] = [];
+  if (c.g.chance(0.6)) {
+    c.feat("rwt");
+    const w = bind_name(c, env, [x]);
+    lines.push("%" + x + " : U32;", w + " = " + u32_rhs(num_gen_u32(c, env, 1)));
+    binds.push(w);
   }
-  // boxed Data elements: new/set/swap (get needs Data too — allowed), the
-  // swap yield is the displaced owned element
-  const cands = c.adts.filter((a) => a.ctors.length > 0);
-  const el = cands.length > 0 ? adt_inst(c, c.g.pick(cands), true) : null;
-  const elT = el !== null && ty_data(el) ? el : ({ k: "tup", a: U32C, b: U32C, q: 2 }) as T;
-  c.feat("array-boxed");
-  const rdE = rd_ensure(c, elT);
-  const k1 = decl_name(c, "ab");
-  const pair = bind_name(c, []), array = bind_name(c, [], [pair]), old = bind_name(c, [], [pair, array]);
-  c.push("def " + k1 + "(" + pair + ": Array<" + ty_grp(elT) + "> & " + ty_str(elT) + ") -> U32:\n  (" + array + ", " + old + ") = " + pair + "\n  " + rdE + "(" + old + ")");
-  const dv = e_at(syn(c, elT, [], 1));
-  const blit = c.g.chance(0.4);
-  if (blit) {
-    c.feat("array-lit");
-  }
-  const index = bind_name(c, []), a0 = bind_name(c, [], [index]), a1 = bind_name(c, [], [index, a0]);
-  c.push("def " + name + "(+" + index + ": U32) -> U32:\n"
-    + "  " + a0 + " = " + (blit ? "[" + dv + " : " + ty_grp(elT) + "^" + String(depth) + "n]" : "Array.new(" + ty_grp(elT) + ", " + String(depth) + "n, " + dv + ")") + "\n"
-    + "  " + a1 + " = Array.set(" + ty_grp(elT) + ", " + a0 + ", " + index + ", " + e_at(syn(c, elT, [], 1)) + ")\n"
-    + "  " + k1 + "(Array.swap(" + ty_grp(elT) + ", " + a1 + ", (" + index + " + 3 : U32), " + e_at(syn(c, elT, [], 1)) + "))");
-  c.defr.push({ name, qps: [], tps: [], ps: [{ q: 2, t: U32C }], ret: U32C });
-  const keep = bind_keep(c);
-  return {
-    text: (keep ? "+" : "") + x + " = " + name + "(" + e_at(num_gen_u32(c, env, 1)) + ")",
-    binds: [x], vars: keep ? [v_new(x, U32C, true)] : [],
-  };
-}
-
-// Map kit
-// -------
-// Map/Set run as written (no native interception): set/get/has/pop/del/
-// keys/union threading through continuation defs.
-
-function let_map(c: Ctx, env: V[]): Line {
-  c.feat("map-ops");
-  const id = String(c.uid());
-  const x = bind_name(c, env);
-  const vT = c.g.pick([U32C, BOOLC, STRC]);
-  const q = ty_data(vT) && c.g.chance(0.7) ? Q2 : Q1;
-  const mT: T = { k: "map", q, v: vT };
-  const qs = qt_str(q);
-  const vs = ty_grp(vT);
-  const rdM = rd_ensure(c, mT);
-  const name = "mpu" + id;
-  const keys = Array.from({ length: 2 + c.g.int(4) }, () => str_lit(c, 1 + c.g.int(6)));
-  let acc = "Map.new(" + qs + ", " + vs + ")";
-  for (const k of keys) {
-    acc = "Map.set(" + qs + ", " + vs + ", " + acc + ", " + k + ", " + e_at(syn(c, vT, [], 1)) + ")";
-  }
-  const style = c.g.wpick<string>([[3, "rd"], [2, "has"], [2, "pop"], [qt_known(q) === 2 && vT.k === "u32" ? 3 : 0, "get"], [1, "set-kit"], [2, "del"], [2, "keys"], [2, "from-list"]]);
-  const lines: string[] = [];
-  if (style === "has") {
-    const k1 = "mh" + id;
-    c.push("def " + k1 + "(r: Map<" + qs + ", " + vs + "> & Bool) -> U32:\n  (m2, b) = r\n  (" + helper_bool(c) + "(b) + " + rdM + "(m2) : U32)");
-    lines.push(x + " = " + k1 + "(Map.has(" + qs + ", " + vs + ", " + acc + ", " + c.g.pick(keys) + "))");
-  } else if (style === "pop") {
-    const k1 = "mp" + id;
-    const mayT: T = { k: "adt", a: BASE.Maybe, qs: [q], args: [vT] };
-    const rdMay = rd_ensure(c, mayT);
-    c.push("def " + k1 + "(r: Map<" + qs + ", " + vs + "> & " + ty_str(mayT) + ") -> U32:\n  (m2, got) = r\n  (" + rdMay + "(got) + " + rdM + "(m2) : U32)");
-    lines.push(x + " = " + k1 + "(Map.pop(" + qs + ", " + vs + ", " + acc + ", " + (c.g.chance(0.5) ? c.g.pick(keys) : str_lit(c, 3)) + "))");
-  } else if (style === "get") {
-    c.feat("set-ops");
-    const k1 = "mg" + id;
-    c.push("def " + k1 + "(r: Map<&2, U32> & U32) -> U32:\n  (m2, v) = r\n  (v + " + rdM + "(m2) : U32)");
-    lines.push(x + " = " + k1 + "(Map.get(U32, " + num_lit_u32(c).s + ", " + acc + ", " + c.g.pick(keys) + "))");
-  } else if (style === "set-kit") {
-    c.feat("set-ops");
-    const k1 = "ms" + id;
-    c.push("def " + k1 + "(r: Set() & Bool) -> U32:\n  (s2, b) = r\n  (" + helper_bool(c) + "(b) + " + String(c.g.int(64)) + " : U32)");
-    let sacc = "Set.new()";
-    for (const k of keys.slice(0, 3)) {
-      sacc = "Set.add(" + sacc + ", " + k + ")";
-    }
-    // a deletion before the probe, of a present or an absent key
-    if (c.g.chance(0.5)) {
-      c.feat("set-del");
-      sacc = "Set.del(" + sacc + ", " + (c.g.chance(0.6) ? c.g.pick(keys) : str_lit(c, 2)) + ")";
-    }
-    lines.push(x + " = " + k1 + "(Set.has(" + sacc + ", " + c.g.pick(keys) + "))");
-  } else if (style === "del") {
-    c.feat("map-del");
-    lines.push(x + " = " + rdM + "(Map.del(" + qs + ", " + vs + ", " + acc + ", " + (c.g.chance(0.6) ? c.g.pick(keys) : str_lit(c, 2)) + "))");
-  } else if (style === "keys") {
-    c.feat("map-keys");
-    const lt = t_list(Q2, STRC);
-    lines.push(x + " = " + rd_ensure(c, lt) + "(Map.keys(" + qs + ", " + vs + ", " + acc + "))");
-  } else if (style === "from-list") {
-    c.feat("map-from-list");
-    const pairs = keys.map((k) => "(" + k + ", " + e_at(syn(c, vT, [], 1)) + ")");
-    lines.push(x + " = " + rdM + "(Map.from_list(" + qs + ", " + vs + ", [" + pairs.join(", ") + "]))");
-  } else {
-    lines.push(x + " = " + rdM + "(" + (c.g.chance(0.3) ? "Map.union(" + qs + ", " + vs + ", " + acc + ", Map.new(" + qs + ", " + vs + "))" : acc) + ")");
-  }
-  const keep = bind_keep(c);
-  lines[lines.length - 1] = (keep ? "+" : "") + lines[lines.length - 1];
-  return { text: lines.join("\n  "), binds: [x], vars: keep ? [v_new(x, U32C, true)] : [] };
+  return { text: lines.join("\n  "), binds, vars: [] };
 }
 
 // Fork kit
@@ -3718,6 +3793,10 @@ function let_fork(c: Ctx, env: V[]): Line {
     }
     vals.push(env_take(c.g.pick(nums)));
   }
+  // no call minted and no rider in scope: nothing to fork
+  if (vals.length === 0) {
+    return let_value(c, env);
+  }
   for (let i = vals.length - 1; i > 0; i--) {
     const j = c.g.int(i + 1);
     const t = vals[i];
@@ -3737,167 +3816,6 @@ function let_fork(c: Ctx, env: V[]): Line {
     text: ks.map((k) => (plus ? "+" : "") + k).join(" ") + " = " + vals.join(" "),
     binds: ks, vars: plus ? ks.map((k) => v_new(k, U32C, true)) : [],
   };
-}
-
-// Share kit
-// ---------
-// Contraction on purpose: a + binder read many times, a + parameter read
-// twice inside a callee — the refcount/borrow machinery's prime shapes.
-
-function let_shared(c: Ctx, env: V[]): Line {
-  c.feat("share");
-  const id = String(c.uid());
-  const s = "sh" + id;
-  const x = bind_name(c, env);
-  const y = bind_name(c, env, [x]);
-  const closed = c.adts.filter((a) => a.ctors.length > 0);
-  const inst = closed.length > 0 ? adt_inst(c, c.g.pick(closed), true) : null;
-  if (inst !== null && ty_data(inst) && c.g.chance(0.6)) {
-    const rdp = rd_ensure(c, inst);
-    const us = "us" + id;
-    // a + parameter read twice inside, or twins: one value passed as both
-    // arguments of a def
-    const twins = c.g.chance(0.4);
-    if (twins) {
-      c.feat("twins");
-      c.push("def " + us + "(+a: " + ty_str(inst) + ", b: " + ty_str(inst) + ", +k: U32) -> U32:\n  " + e_at(num_combine(c, [e_atom(rdp + "(a)"), e_atom(rdp + "(b)"), e_atom(rdp + "(a)"), e_atom("k")])));
-      c.defr.push({ name: us, qps: [], tps: [], ps: [{ q: 2, t: inst }, { q: 1, t: inst }, { q: 2, t: U32C }], ret: U32C });
-    } else {
-      c.push("def " + us + "(+s: " + ty_str(inst) + ", +k: U32) -> U32:\n  " + e_at(num_combine(c, [e_atom(rdp + "(s)"), e_atom(rdp + "(s)"), e_atom("k")])));
-      c.defr.push({ name: us, qps: [], tps: [], ps: [{ q: 2, t: inst }, { q: 2, t: U32C }], ret: U32C });
-    }
-    const lines = [
-      "+" + s + " = {" + syn(c, inst, env, 2).s + " : " + ty_str(inst) + "}",
-      x + " = " + us + "(" + s + ", " + (twins ? s + ", " : "") + e_at(num_gen_u32(c, env, 1)) + ")",
-      y + " = (" + rdp + "(" + s + ") + " + x + " : U32)",
-    ];
-    return { text: lines.join("\n  "), binds: [y], vars: [] };
-  }
-  const lines = [
-    "+" + s + " = " + u32_rhs(num_gen_u32(c, env, 2)),
-    x + " = " + e_at(num_combine(c, [e_atom(s), e_atom(s), num_gen_u32(c, env, 1)])),
-    y + " = (" + s + " + " + x + " : U32)",
-  ];
-  return { text: lines.join("\n  "), binds: [y], vars: [] };
-}
-
-// Ford kit
-// --------
-// The Word idiom: an indexed family as a filled type-level def over a
-// minted Nat clone, per-index constructor types, index-first matching
-// (the field's computed type reduces per arm), and a hole-motive
-// transport (Word.cast style).
-function let_ford(c: Ctx, env: V[]): Line {
-  c.feat("ford");
-  const id = String(c.uid());
-  const N = "Fn" + id;
-  const Z = N + "z";
-  const S = N + "s";
-  c.push("type " + N + " is Data:\n  " + Z + "{}\n  " + S + "{p: " + N + "}");
-  const V0 = "Fv" + id;
-  const P = c.g.pick([U32C, BOOLC]);
-  c.push("law " + V0 + ":\n  for n: " + N + "\n  Data");
-  c.push("type " + V0 + ".Nil is Data:\n  " + V0 + "n{}");
-  c.push("type " + V0 + ".Con<-p: " + N + "> is Data:\n  " + V0 + "c{head: " + ty_str(P) + ", tail: " + V0 + "(p)}");
-  c.push("def " + V0 + "(n):\n  match n:\n    case " + Z + "{}:\n      " + V0 + ".Nil\n    case " + S + "{p}:\n      " + V0 + ".Con<p>");
-  const toN = "fw" + id;
-  c.push("def " + toN + "(k: Nat) -> " + N + ":\n  match k:\n    case 0n:\n      " + Z + "{}\n    case 1n+p:\n      " + S + "{" + toN + "(p)}");
-  const bld = "fb" + id;
-  c.push("def " + bld + "(n: " + N + ", +s: U32) -> " + V0 + "(n):\n  match n:\n    case " + Z + "{}:\n      " + V0 + "n{}\n    case " + S + "{p}:\n      "
-    + V0 + "c{" + (P.k === "u32" ? "s" : "U32.is_gt(s, 4)") + ", " + bld + "(p, (s + 3 : U32))}");
-  const rdP = P.k === "u32" ? null : helper_bool(c);
-  const eat = "fe" + id;
-  c.push("def " + eat + "(n: " + N + ", v: " + V0 + "(n), +acc: U32) -> U32:\n  match n:\n    case " + Z + "{}:\n      acc\n    case " + S + "{p}:\n      match v:\n        case " + V0 + "c{h, t}:\n          "
-    + eat + "(p, t, (acc + " + (rdP === null ? "h" : rdP + "(h)") + " : U32))");
-  // hole-motive transport: cast across a proved index equation
-  const cast = "fc" + id;
-  c.push("def " + cast + "(-m: " + N + ", -n: " + N + ", e: {m == n : " + N + "}, w: " + V0 + "(m)) -> " + V0 + "(n):\n  %e : " + V0 + "(_); w");
-  const use = "fu" + id;
-  // n is consumed twice (eat and bld): copy through a + binder; the cast
-  // — the identity transport across the reflexive index equation — rides
-  // a coin so both spellings reach the compiled legs (its Word.cast shape
-  // (%e : F(_); w) was a compiler-crash class once, reg_rwt_carb_binders)
-  const casted = c.g.chance(0.5);
-  if (casted) {
-    c.feat("ford-cast");
-  }
-  const built = casted ? cast + "(n, n, {==}, " + bld + "(n, s))" : bld + "(n, s)";
-  c.push("def " + use + "(k: Nat, +s: U32) -> U32:\n  +n = " + toN + "(k)\n  " + eat + "(n, " + built + ", 7)");
-  c.defr.push({ name: use, qps: [], tps: [], ps: [{ q: 1, t: NATC }, { q: 2, t: U32C }], ret: U32C, mask: [c.pure ? 12 : 40, null] });
-  const x = bind_name(c, env);
-  return {
-    text: x + " = " + use + "(U32.to_nat((" + e_at(num_gen_u32(c, env, 1)) + " % " + String(c.pure ? 12 : 40) + " : U32)), " + e_at(num_gen_u32(c, env, 1)) + ")",
-    binds: [x], vars: [],
-  };
-}
-
-// Line kits
-// ---------
-
-function let_scalar(c: Ctx, env: V[]): Line {
-  const x = bind_name(c, env);
-  const keep = bind_keep(c);
-  return {
-    text: (keep ? "+" : "") + x + " = " + u32_rhs(num_gen_u32(c, env, 2 + c.g.int(3))),
-    binds: [x],
-    vars: keep ? [v_new(x, U32C, true)] : [],
-  };
-}
-
-// let_value : a typed value of a synthesized type, bound (annotated when
-// non-inferable) and folded through its reader; Data values sometimes
-// stay in scope under a + binder for later reuse.
-function let_value(c: Ctx, env: V[]): Line {
-  const t = syn_ty(c, size_pick(c, 2, 5), Q0, [], []);
-  if (t.k === "u32" || t.k === "arr") {
-    return let_scalar(c, env);
-  }
-  c.feat(t.k === "fun" ? "clo" : "value");
-  const x = bind_name(c, env);
-  const y = bind_name(c, env, [x]);
-  const val = c.g.chance(0.3) ? def_new(c, t, env, 2) ?? syn(c, t, env, 2) : syn(c, t, env, 2 + c.g.int(2));
-  const keep = ty_data(t) && c.g.chance(0.4);
-  const kind = c.g.wpick<string>([
-    [50, "plain"],
-    [t.k === "adt" && !ty_open(t) ? 20 : 0, "tf"],
-    [keep ? 15 : 0, "twice"],
-  ]);
-  const rd = rd_ensure(c, t);
-  const sig = keep ? "+" : "";
-  const ykeep = bind_keep(c);
-  // annotate: intro-headed values are not inferable in a bare let
-  const lines: string[] = [sig + x + " = {" + val.s + " : " + ty_top(t) + "}"];
-  if (kind === "tf") {
-    c.feat("reuse");
-    lines.push((ykeep ? "+" : "") + y + " = " + rd + "(" + tf_ensure(c, t as Extract<T, { k: "adt" }>) + "(" + x + "))");
-  } else if (kind === "twice") {
-    c.feat("dup");
-    lines.push((ykeep ? "+" : "") + y + " = (" + rd + "(" + x + ") + " + rd + "(" + x + ") : U32)");
-  } else {
-    lines.push((ykeep ? "+" : "") + y + " = " + rd + "(" + x + ")");
-  }
-  const vars = ykeep ? [v_new(y, U32C, true)] : [];
-  if (keep && kind !== "twice") {
-    vars.push(v_new(x, t, true));
-  }
-  return { text: lines.join("\n  "), binds: [y], vars };
-}
-
-function let_call(c: Ctx, env: V[]): Line {
-  const x = bind_name(c, env);
-  const e = c.g.wpick<() => E>([
-    [60, () => def_call(c, U32C, env, 2) ?? num_gen_u32(c, env, 2)],
-    [8, () => {
-      generic_mint(c);
-      return syn_call_unify(c, U32C, env, 2) ?? num_gen_u32(c, env, 2);
-    }],
-    [8, () => hof_call(c, env)],
-  ])();
-  const bang = e.head !== undefined && e.s.startsWith(e.head + "(") && gpu_mark(c) !== "";
-  const s = bang ? (e.head as string) + "!" + e.s.slice((e.head as string).length) : e.s;
-  const keep = bind_keep(c);
-  const rhs = e.p === 99 ? (/^\d+$/.test(s) ? "{" + s + " : U32}" : s) : "(" + s + ")";
-  return { text: (keep ? "+" : "") + x + " = " + rhs, binds: [x], vars: keep ? [v_new(x, U32C, true)] : [] };
 }
 
 // hof_call : closures through HOFs and partial application
@@ -3940,26 +3858,6 @@ function hof_call(c: Ctx, env: V[]): E {
   return e_atom(hf + "(" + (tmpl ? "~(" + lam + ")" : lam) + ", " + e_at(num_gen_u32(c, env, 1)) + ")");
 }
 
-// let_float : an F32 chain folded through exact conversions — compiled
-// legs only (c.pure guards its reachability)
-function let_float(c: Ctx, env: V[]): Line {
-  c.feat("f32");
-  const f = "f" + String(c.uid());
-  const x = bind_name(c, env);
-  const val = num_gen_f32(c, env, 2 + c.g.int(2));
-  const many = c.g.chance(0.4);
-  const rhs = c.g.chance(0.7)
-    ? e_fn("F32.to_u32", e_bin(e_atom(f), "*.", num_lit_f32(c, false)))
-    : e_fn(helper_bool(c), e_bin(e_atom(f), c.g.pick(["<.", "<=.", ">=.", "!=.", "==."]), num_gen_f32(c, env, 2)));
-  const keep = bind_keep(c);
-  // an F32 literal is a bare constructor: a let value must annotate
-  return {
-    text: (many ? "+" : "") + f + " = {" + val.s + " : F32}\n  " + (keep ? "+" : "") + x + " = " + e_at(rhs),
-    binds: [x],
-    vars: (many ? [v_new(f, F32C, true)] : []).concat(keep ? [v_new(x, U32C, true)] : []),
-  };
-}
-
 // Member generation
 // -----------------
 // A member is one seed's program pieces, position-independent so a batched
@@ -3977,6 +3875,7 @@ type Stmt = { text: string; binds: string[] };
 // reducer can drop pieces and assemble() re-renders the rest.
 type Member = {
   seed: bigint;
+  prof: Profile;
   withBase: boolean;
   resultName: string;
   rawName: string;
@@ -3988,7 +3887,7 @@ type Member = {
   xlines: Stmt[];
   xfold: string;
   tail: IoTail | null;
-  show: { ty: string; val: string } | null;
+  show: { ty: string; t: T; val: string } | null;
   entries: string[];
   feats: string[];
   trans: boolean;
@@ -4013,20 +3912,48 @@ type Eff = { file: string; decls: string[]; c: string; js: string; name: string;
 // legs must print it. Printable: the scalars, tuples, List, Maybe, a
 // non-generic program datatype with no erased field, an Array of U32.
 
-function show_seed(seed: bigint): boolean {
-  return seed_roll(seed, 0x2bn) < SHOW_PCT;
+// Profile : what a seed's program is, drawn from the seed alone so a solo
+// re-run reproduces it. base: Base in the initial environment; free:
+// unrestricted declaration names; show: a pure main printed as its literal
+// (always so without Base: IO is Base's); file: the member sits in a file of
+// its own, else inline in the entry; effect: a foreign effect of its own;
+// clash: also checked as a program that must be refused; io: an IO tail;
+// surface: the chance per synthesis node of a surface wrapper.
+type Profile = { base: boolean; free: boolean; show: boolean; file: boolean; effect: boolean; clash: boolean; io: boolean; surface: number };
+
+const PROFILES = new Map<bigint, Profile>();
+
+function profile(seed: bigint): Profile {
+  const got = PROFILES.get(seed);
+  if (got !== undefined) {
+    return got;
+  }
+  const g = new Gen(rng_mix64(seed ^ 0x70f1en));
+  const base = g.chance(0.88);
+  const show = !base || g.chance(0.08);
+  const p: Profile = {
+    base,
+    free: g.chance(0.2),
+    show,
+    file: g.chance(0.25),
+    effect: base && !show && g.chance(0.25),
+    clash: !show && g.chance(0.15),
+    io: base && !show && g.int(100) < IO_PCT,
+    surface: g.wpick<number>([[2, 0], [3, 0.02], [3, 0.08], [2, 0.2]]),
+  };
+  if (PROFILES.size > 100_000) {
+    PROFILES.clear();
+  }
+  PROFILES.set(seed, p);
+  return p;
 }
 
-function base_seed(seed: bigint): boolean {
-  return seed_roll(seed, 0x6dn) >= NO_BASE_PCT;
-}
-
-function free_name_seed(seed: bigint): boolean {
-  return seed_roll(seed, 0x91n) < FREE_NAME_PCT;
-}
-
-function standalone_seed(seed: bigint): boolean {
-  return show_seed(seed) || !base_seed(seed) || free_name_seed(seed);
+// standalone : a seed that owns its whole program — a pure main, an empty
+// initial environment, or free names inline in the entry (in a file of its
+// own they are namespaced apart)
+function standalone(seed: bigint): boolean {
+  const p = profile(seed);
+  return p.show || !p.base || (p.free && !p.file);
 }
 
 function ty_showable(t: T, depth = 0): boolean {
@@ -4515,9 +4442,10 @@ function eff_rows(e: Eff, i: number): string[] {
     "w" + String(i) + "f" + String(j) + " : Unit <- IO.print(" + e.show + "(w" + String(i) + "e" + String(j) + "))"]);
 }
 
-function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
-  const withBase = base_seed(seed);
-  const c = ctx_new(seed, uid0, withBase, free_name_seed(seed));
+function gen_member(seed: bigint, uid0 = 0): Member {
+  const prof = profile(seed);
+  const withBase = prof.base;
+  const c = ctx_new(seed, uid0, withBase, prof.free, prof.surface);
   c.feat(withBase ? "with-base" : "no-base");
   const nadts = withBase ? c.g.int(3) : 1 + c.g.int(4);
   for (let i = 0; i < nadts; i++) {
@@ -4533,41 +4461,31 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
     adt_new(c.sub("adt"));
   }
   c.pure = true;
-  if (!withBase || show_seed(seed)) {
+  const member = (m: Partial<Member>): Member => ({
+    seed, prof, withBase, resultName: "", rawName: "", res: "", lines: [], fold: "", seal: "", extraName: null, xlines: [], xfold: "",
+    tail: null, show: null, eff: null, ...m, entries: c.entries.slice(), feats: Object.keys(c.s.feat), trans: c.trans,
+  });
+  if (prof.show) {
     c.feat("show");
     const t = show_ty(c.sub("show"), 2);
     c.feat("show-" + t.k);
     const val = e_at(syn(c.sub("show"), t, [], 2 + c.g.int(2)));
-    return {
-      seed, withBase, resultName: "", rawName: "", res: "", lines: [], fold: "", seal: "", extraName: null, xlines: [], xfold: "",
-      tail: null, show: { ty: t.k === "tup" ? "(" + ty_str(t) + ")" : ty_str(t), val },
-      entries: c.entries.slice(), feats: Object.keys(c.s.feat), trans: c.trans, eff: null,
-    };
+    return member({ show: { ty: t.k === "tup" ? "(" + ty_str(t) + ")" : ty_str(t), t, val } });
   }
-  // result: the interp-visible side
+  // the statement table, reshaped per seed (swarm) so a rare production
+  // gets seeds where it dominates; result is the interpreter-visible side,
+  // extra the compiled-only one (F32, deep forks, long loops)
+  const kit = (pure: boolean): Kit => {
+    const k: Kit = [[60, let_value], [pure ? 16 : 25, let_fork], [pure ? 12 : 5, let_proof]];
+    const swarm: Kit = k.map(([w, f]) => [w * c.g.wpick<number>([[20, 0], [45, 1], [20, 2], [15, 4]]), f]);
+    return swarm.some(([w]) => w > 0) ? swarm : k;
+  };
   const env: V[] = [];
-  const LETK: Kit = [
-    [12, let_scalar],
-    [30, let_value],
-    [16, let_call],
-    [7, let_fork],
-    [7, let_array],
-    [6, let_map],
-    [6, let_shared],
-    [4, let_eql],
-    [3, theorem_gen],
-    [3, let_eqkit],
-    [3, let_ford],
-  ];
-  // swarm : per-seed multipliers reshape the weight table so rare kinds
-  // get seeds where they dominate
-  const swarm: Kit = LETK.map(([w, f]) => [w * c.g.wpick<number>([[20, 0], [45, 1], [20, 2], [15, 4]]), f]);
-  const table = swarm.some(([w]) => w > 0) ? swarm : LETK;
   const heavy = c.g.chance(0.08);
   if (heavy) {
     c.feat("big");
   }
-  const lines = lines_gen(c, table, "res", size_pick(c, heavy ? 5 + c.g.int(5) : 2 + c.g.int(3), 48), env);
+  const lines = lines_gen(c, kit(true), "res", size_pick(c, heavy ? 5 + c.g.int(5) : 2 + c.g.int(3), 48), env);
   if (c.g.chance(0.04)) {
     c.feat("deaddef");
     c.push("def " + decl_name(c, "zd") + "(x: U32) -> U32:\n  (x + " + String(1 + c.g.int(99)) + " : U32)");
@@ -4577,7 +4495,6 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
   const seal = e_at(num_seal(c.sub("seal"), res));
   const resultName = decl_name(c, "rs");
   const rawName = decl_name(c, "rw");
-  // extra: the compiled-only side (F32, deep forks, long loops)
   c.pure = false;
   let extraName: string | null = null;
   let xlines: Stmt[] = [];
@@ -4585,35 +4502,20 @@ function gen_member(seed: bigint, uid0 = 0, io_ok = true): Member {
   if (c.g.chance(0.9)) {
     extraName = decl_name(c, "xt");
     const xenv: V[] = [];
-    const XK: Kit = [
-      [30, let_float],
-      [16, let_fork],
-      [14, let_call],
-      [10, let_value],
-      [8, let_array],
-      [8, let_scalar],
-    ];
-    xlines = lines_gen(c, XK, "extra", 1 + c.g.int(3), xenv);
+    xlines = lines_gen(c, kit(false), "extra", 1 + c.g.int(3), xenv);
     xfold = e_at(num_combine(c.sub("xfold"), stmt_names(xlines).map((n) => e_atom(n)).concat([num_gen_u32(c.sub("xfold"), xenv, 1)])));
   }
   c.pure = true;
-  // io tail
-  const tail = io_ok && seed_roll(seed, 0x17n) < IO_PCT ? io_tail(c.sub("io"), seed) : null;
-  const eff = withBase && seed_roll(seed, 0xe5n) < EFFECT_PCT ? eff_new(c.sub("eff"), seed) : null;
-  return {
-    seed, withBase, resultName, rawName, res, lines, fold, seal, extraName, xlines, xfold, tail, show: null,
-    entries: c.entries.slice(),
-    feats: Object.keys(c.s.feat),
-    trans: c.trans,
-    eff,
-  };
+  const tail = prof.io ? io_tail(c.sub("io"), seed) : null;
+  const eff = prof.effect ? eff_new(c.sub("eff"), seed) : null;
+  return member({ resultName, rawName, res, lines, fold, seal, extraName, xlines, xfold, tail, eff });
 }
 
 // member_defs : the member's own defs — result (sealed), the raw sibling
 // when asked, and extra — rendered after its entries
-function member_defs(m: Member, raw: boolean): string[] {
+function member_defs(m: Member, raw: boolean, main = "main"): string[] {
   if (m.show !== null) {
-    return ["def main() -> " + m.show.ty + ":\n  " + m.show.val];
+    return ["def " + main + "() -> " + m.show.ty + ":\n  " + m.show.val];
   }
   const head = m.lines.map((l) => l.text).concat(["+" + m.res + " = " + m.fold]).join("\n  ");
   const def = (name: string, ret: string): string => "def " + name + "() -> U32:\n  " + head + "\n  " + ret;
@@ -4638,9 +4540,10 @@ function member_drop(m: Member, which: "lines" | "xlines", i: number): Member {
 
 // Assembly
 // --------
-// Expected stdout per member: the result line (interp-known), the tail's
-// lines (known or cross-leg-only), the extra line (cross-leg-only).
-// `null` marks a line whose value only the legs can agree on.
+// Expected stdout per member: the result line (interp-known), its effect's
+// lines, the tail's lines (known or cross-leg-only), the extra line
+// (cross-leg-only). `null` marks a line whose value only the legs can agree
+// on.
 
 type Expect = { out: Array<string | null>; err: string[]; code: number };
 
@@ -4665,8 +4568,8 @@ function member_dies(m: Member): boolean {
   return m.tail !== null && m.tail.code !== 0;
 }
 
-// member_rows : one member's lines of a main — its result, its tail, and
-// its extra unless it dies (the IO.die is the block's end)
+// member_rows : one member's lines of a main — its result, its effect, its
+// tail, and its extra unless it dies (the IO.die ends its rows)
 function member_rows(m: Member, i: number, spelling: Spelling): string[] {
   const rows = ["w" + String(i) + "a : Unit <- IO.print(U32.show(" + (spelling === "raw" ? m.rawName : m.resultName) + "()))"];
   if (m.eff !== null) {
@@ -4681,68 +4584,12 @@ function member_rows(m: Member, i: number, spelling: Spelling): string[] {
   return rows;
 }
 
-// member_main : the program's main. With no dying member it prints every
-// member in order. A dying member ends the process, so it gets its own
-// block, and main dispatches on the FZ_MEMBER environment variable: unset
-// runs the non-dying members (fzall), "i" runs member i's block — one
-// binary, one run per dying member plus one for the rest.
-function member_main(ms: Member[], spelling: Spelling): string {
-  const block = (name: string, rows: string[], end: string): string =>
-    "def " + name + "() -> IO(Unit):\n  do IO<Unit>:\n" + rows.concat([end]).map((r) => "    " + r).join("\n");
-  if (ms.length === 1 && ms[0].show !== null) {
-    return "";
-  }
-  const dying = ms.map((_, i) => i).filter((i) => member_dies(ms[i]));
-  const rest = ms.flatMap((m, i) => member_dies(m) ? [] : member_rows(m, i, spelling));
-  if (dying.length === 0) {
-    return block("main", rest, "IO.pure(Unit, Unit{})");
-  }
-  const RES = "Result<&1, &1, U32 & String, String>";
-  const sel = (j: number): string => "fzsel" + String(j) + "(String.eq(s, \"" + String(dying[j]) + "\"), s)";
-  const defs = [block("fzall", rest, "IO.pure(Unit, Unit{})")];
-  for (const i of dying) {
-    const m = ms[i];
-    defs.push(block("fzm" + String(i), member_rows(m, i, spelling),
-      "IO.die(Unit, " + String((m.tail as IoTail).code) + ", \"fzdie_" + (m.seed & 0xffffffn).toString(16) + "\")"));
-  }
-  // the selector chain, last link first: no forward references
-  for (let j = dying.length - 1; j >= 0; j--) {
-    defs.push("def fzsel" + String(j) + "(z: Bool, +s: String) -> IO(Unit):\n  match z:\n    case True{}:\n      fzm" + String(dying[j])
-      + "()\n    case False{}:\n      " + (j + 1 < dying.length ? sel(j + 1) : "fzall()"));
-  }
-  defs.push("def fzdis(r: " + RES + ") -> IO(Unit):\n  match r:\n    case Done{s0}:\n      +s = s0\n      " + sel(0)
-    + "\n    case Fail{e}:\n      fzall()");
-  defs.push("def main() -> IO(Unit):\n  do IO<Unit>:\n    sel : " + RES + " <- IO.get_env(\"FZ_MEMBER\")\n    fzdis(sel)");
-  return defs.join("\n\n");
-}
-
-// assemble : one program. "sealed" is what the compiled legs run and
-// findings save; "both" adds the raw sibling for the interpreter
-// differential; "raw" is the raw spelling alone, for attributing a reject.
-function assemble(ms: Member[], spelling: Spelling): string {
-  const withBase = ms[0]?.withBase ?? true;
-  if (ms.some((m) => m.withBase !== withBase)) {
-    throw new Error("cannot assemble members with different initial environments");
-  }
-  const head = "# fuzz " + spelling + (ms.length > 1 ? " batch of " + String(ms.length) : "")
-    + " seed=" + ms.map((m) => String(m.seed)).join(",") + "\n\n" + (withBase ? "import Base\n\n" : "");
-  const blocks: string[] = [];
-  for (const m of ms) {
-    blocks.push(...m.entries);
-    blocks.push(...(m.eff?.decls ?? []));
-    blocks.push(...member_defs(m, spelling !== "sealed"));
-  }
-  blocks.push(member_main(ms, spelling));
-  return head + blocks.filter((b) => b !== "").join("\n\n") + "\n";
-}
-
 // Programs on disk
 // ----------------
 // A Prog is what a worker loads: the entry's source, plus files beside it
-// (paths relative to the request's root), symlinks (a path to its target, relative to the link's directory) and
-// files of the hub store (paths relative to BEND_LIB). A flat program with
-// no effect is its source alone; a flat program with effects adds their
-// .c and .js; a module layout names its entry among the files.
+// (paths relative to the request's root), symlinks (a path to its target,
+// relative to the link's directory) and files of the hub store (paths
+// relative to BEND_LIB). A one-file program is its source alone.
 
 type Prog = { src: string; entry?: string; files?: Record<string, string>; links?: Record<string, string>; hub?: Record<string, string> };
 
@@ -4751,7 +4598,7 @@ function prog_text(p: Prog): string {
   if (p.entry === undefined && p.files === undefined) {
     return p.src;
   }
-  const out = [p.entry === undefined ? p.src : "# (a module layout: the entry is " + p.entry + ")\n"];
+  const out = [p.entry === undefined ? p.src : "# (a file layout: the entry is " + p.entry + ")\n"];
   for (const [f, t] of Object.entries(p.files ?? {})) {
     out.push("#@@ file " + f + "\n" + t);
   }
@@ -4764,27 +4611,20 @@ function prog_text(p: Prog): string {
   return out.join("\n");
 }
 
-// flat : the flat program, its effects' files beside it
-function flat(ms: Member[], spelling: Spelling): Prog {
-  const src = assemble(ms, spelling);
-  const effs = ms.flatMap((m) => m.eff === null ? [] : [m.eff]);
-  if (effs.length === 0) {
-    return { src };
-  }
-  return { src, files: Object.fromEntries(effs.flatMap((e) => [[e.file + ".c", e.c], [e.file + ".js", e.js]])) };
-}
-
-// Modules
-// -------
-// A module layout puts each member in a file of its own, under a path the
-// generator draws, and an entry that imports every one of them under an
-// alias and runs it. Paths: nested directories, hyphens, host and Base
-// spellings, an entry placed below the root so imports climb with ../,
-// spellings with and without ./, a symlinked directory, the hub store
-// (0x<hash>/.., the hash of the module's text). A member imported through a link
-// is sometimes imported twice, through its real path too, under a second
-// alias: one file, one namespace, and both aliases reach it. Names stay the
-// member's own: namespaces keep the members apart, not uids.
+// Layout
+// ------
+// A program is an entry file and what it imports. Each member sits inline
+// in the entry or in a file of its own (its profile draws which), under a
+// path the group draws: nested directories, hyphens, host and Base words, an
+// entry below the root so imports climb with ../, spellings with and without
+// ./, a symlinked directory, the hub store (0x<hash>/.., the hash of the
+// file's text). A member reached through a link is sometimes imported
+// twice, through its real path too, under a second alias: one file, one
+// namespace, both aliases reach it. Inline members keep apart by uid, filed
+// ones by namespace. Every member gets a rows def printing its lines (ending
+// in its IO.die when its tail dies); main runs the rows of every member
+// that lives and hands FZ_MEMBER=i to member i's rows when it dies. A show
+// member's main is its value, reached through its alias when it is filed.
 
 const SEG_HEAD = NAME_HEAD;
 const SEG_BODY = NAME_BODY + "-";
@@ -4803,8 +4643,8 @@ function seg(g: Gen): string {
   return g.pick(SEG_HEAD.split("")) + Array.from({ length: n - 1 }, () => g.pick(SEG_BODY.split(""))).join("");
 }
 
-// alias_new : an import's alias, fresh in its file, and no Base prefix (the
-// entry calls Base's IO and U32 through their own names)
+// alias_new : an import's alias, fresh in the entry, and no Base prefix
+// (the entry calls Base's IO and U32 through their own names)
 function alias_new(g: Gen, taken: Set<string>): string {
   for (;;) {
     const a = g.chance(0.3) ? g.pick(NAME_WORDS) : seg(g).replace(/-/g, "_");
@@ -4815,28 +4655,46 @@ function alias_new(g: Gen, taken: Set<string>): string {
   }
 }
 
+// fresh_name : stem, or stem and a counter, not in taken (which it joins)
+function fresh_name(stem: string, taken: Set<string>): string {
+  let n = stem;
+  for (let k = 0; taken.has(n); k++) {
+    n = stem + String(k);
+  }
+  taken.add(n);
+  return n;
+}
+
 function hex32(x: bigint): string {
   return rng_mix64(x).toString(16).padStart(16, "0") + rng_mix64(x ^ 0x5eedn).toString(16).padStart(16, "0");
 }
 
-// Mod : one member's module. file: its path from the request root, or from
-// the store for a hub file; spell: how the entry imports it; twice: the
-// second spelling and alias when it is imported twice
-type Mod = { i: number; m: Member; dir: string[]; base: string; hub: string | null; alias: string; spell: string;
+// Mod : one member's place. file: false for an inline member (its text
+// goes into the entry), else its path from the request root, or from the
+// store for a hub file; spell: how the entry imports it; twice: the second
+// spelling and alias when it is imported twice; rows: its rows def (its
+// value's def for a show member)
+type Mod = { i: number; m: Member; file: boolean; dir: string[]; base: string; hub: string | null; alias: string; spell: string;
   twice: { alias: string; spell: string } | null; rows: string; text: string; effC: string; effJs: string };
 
-// Layout : a module layout's parts; mutations edit them before serial().
-// entryHead, entryDefs and mainRows are lines a mutation adds to the entry
+// Layout : a program's parts; a clash edits them before serial(). entryHead,
+// entryDefs and mainRows are lines a clash adds to the entry; names: what
+// the entry declares
 type Layout = { entryDir: string[]; entryName: string; mods: Mod[]; links: Record<string, string>;
   extraFiles: Record<string, string>; extraHub: Record<string, string>; entryHead: string[]; entryDefs: string[];
-  mainRows: string[]; withBase: boolean };
+  mainRows: string[]; withBase: boolean; names: Set<string>; spelling: Spelling };
 
 function mod_file(md: Mod): string {
   return [...md.dir, md.base + ".bend"].join("/");
 }
 
-// modules : the module layout of a group, a function of its members' seeds
-function modules(ms: Member[], spelling: Spelling): Layout {
+function member_blocks(m: Member, spelling: Spelling, main = "main"): string[] {
+  return [...m.entries, ...(m.eff?.decls ?? []), ...member_defs(m, spelling !== "sealed", main)];
+}
+
+// layout : a group's program parts, a function of its members' seeds;
+// filed puts every member in a file (a clash mutates one)
+function layout(ms: Member[], spelling: Spelling, filed = false): Layout {
   const g = new Gen(rng_mix64(ms[0].seed ^ 0x6d6fn));
   const used = new Set<string>();
   const fresh = (p: string): boolean => {
@@ -4851,9 +4709,19 @@ function modules(ms: Member[], spelling: Spelling): Layout {
   entryDir.forEach((_, j) => fresh("d:" + entryDir.slice(0, j + 1).join("/")));
   const entryName = seg(g);
   fresh([...entryDir, entryName + ".bend"].join("/"));
-  const aliases = new Set<string>();
+  const inline = (m: Member): boolean => !filed && !m.prof.file;
+  // what the entry declares: an alias must not be its first segment
+  const names = new Set<string>(ms.filter(inline).flatMap((m) => member_blocks(m, spelling).flatMap(text_names)));
+  // nor a name main's own rows bind or declare
+  const aliases = new Set<string>([...names].map((n) => n.split(".")[0])
+    .concat(["main", "fzall", "fzdis", "fzsel", "sel", "s", "s0", "z", "r", "e"], ms.flatMap((_, i) => ["w" + String(i), "w" + String(i) + "t"])));
   const links: Record<string, string> = {};
   const mods: Mod[] = ms.map((m, i) => {
+    const md: Mod = { i, m, file: false, dir: entryDir, base: entryName, hub: null, alias: "", spell: "", twice: null, rows: "", text: "",
+      effC: m.eff?.c ?? "", effJs: m.eff?.js ?? "" };
+    if (inline(m)) {
+      return md;
+    }
     const mg = new Gen(rng_mix64(m.seed ^ 0x7061n));
     const hub = mg.chance(0.15) ? "0x" : null;
     let dir: string[];
@@ -4867,11 +4735,9 @@ function modules(ms: Member[], spelling: Spelling): Layout {
     }
     const alias = alias_new(mg, aliases);
     const real = [...dir, base + ".bend"].join("/");
-    let spell: string;
+    let spell = "";
     let twice: Mod["twice"] = null;
-    if (hub !== null) {
-      spell = "";
-    } else {
+    if (hub === null) {
       const rel = path.posix.relative(entryDir.join("/") || ".", real);
       spell = !rel.startsWith("../") && mg.chance(0.7) ? "./" + rel : rel;
       if (dir.length > 0 && mg.chance(0.25)) {
@@ -4881,43 +4747,65 @@ function modules(ms: Member[], spelling: Spelling): Layout {
         }
         links[link] = dir.join("/");
         const via = path.posix.relative(entryDir.join("/") || ".", link + "/" + base + ".bend");
-        const both = m.withBase && m.show === null && !member_dies(m) && mg.chance(0.5);
-        if (both) {
+        if (m.withBase && m.show === null && !member_dies(m) && mg.chance(0.5)) {
           twice = { alias: alias_new(mg, aliases), spell };
         }
         spell = !via.startsWith("../") ? "./" + via : via;
       }
     }
-    return { i, m, dir, base, hub, alias, spell, twice, rows: "", text: "", effC: m.eff?.c ?? "", effJs: m.eff?.js ?? "" };
+    return { ...md, file: true, dir, base, hub, alias, spell, twice };
   });
   for (const md of mods) {
     const m = md.m;
-    const blocks = [...m.entries, ...(m.eff?.decls ?? []), ...member_defs(m, spelling !== "sealed")];
-    const taken = new Set(blocks.flatMap((b) => text_names(b)));
-    md.rows = "fzrows";
-    for (let n = 0; taken.has(md.rows); n++) {
-      md.rows = "fzrows" + String(n);
-    }
-    if (m.withBase && m.show === null) {
+    const taken = md.file ? new Set(member_blocks(m, spelling).flatMap(text_names)) : names;
+    md.rows = fresh_name(m.show !== null ? "fzshow" : "fzrows", taken);
+    const blocks = member_blocks(m, spelling, md.file ? md.rows : "main");
+    if (m.show === null) {
       const end = member_dies(m) ? "IO.die(Unit, " + String((m.tail as IoTail).code) + ", \"fzdie_" + (m.seed & 0xffffffn).toString(16) + "\")"
         : "IO.pure(Unit, Unit{})";
       blocks.push("def " + md.rows + "() -> IO(Unit):\n  do IO<Unit>:\n" + member_rows(m, md.i, spelling).concat([end]).map((r) => "    " + r).join("\n"));
     }
-    md.text = (m.withBase ? "import Base\n\n" : "") + blocks.filter((b) => b !== "").join("\n\n") + "\n";
+    md.text = (md.file && m.withBase ? "import Base\n\n" : "") + blocks.filter((b) => b !== "").join("\n\n") + (md.file ? "\n" : "");
   }
-  return { entryDir, entryName, mods, links, extraFiles: {}, extraHub: {}, entryHead: [], entryDefs: [], mainRows: [], withBase: ms[0].withBase };
+  return { entryDir, entryName, mods, links, extraFiles: {}, extraHub: {}, entryHead: [], entryDefs: [], mainRows: [], withBase: ms[0].withBase, names, spelling };
 }
 
-// module_main : the entry's main over the modules, as member_main is over
-// flat members: every module's rows in order, a twice-imported one's value
-// again through its second alias, and FZ_MEMBER selecting a dying one
-function module_main(l: Layout): string[] {
-  if (!l.withBase || l.mods.some((md) => md.m.show !== null)) {
-    return [];
+// ty_qual : a show member's type as the entry spells it, the member's own
+// datatypes under its alias
+function ty_qual(md: Mod): string {
+  const show = md.m.show as { ty: string; t: T };
+  const own: string[] = [];
+  const walk = (t: T): void => {
+    if (t.k === "adt") {
+      if (t.a.base !== true && !own.includes(t.a.name)) {
+        own.push(t.a.name);
+      }
+      t.args.forEach(walk);
+    } else if (t.k === "tup") {
+      walk(t.a);
+      walk(t.b);
+    } else if (t.k === "arr") {
+      walk(t.el);
+    }
+  };
+  walk(show.t);
+  own.sort((a, b) => b.length - a.length);
+  return own.length === 0 ? show.ty
+    : show.ty.replace(new RegExp("(?<![\\w.])(" + own.map(re_lit).join("|") + ")(?![\\w.])", "g"), md.alias + ".$1");
+}
+
+// main_defs : the entry's main over its members
+function main_defs(l: Layout): string[] {
+  const md0 = l.mods[0];
+  if (md0.m.show !== null) {
+    return md0.file ? ["def main() -> " + ty_qual(md0) + ":\n  " + md0.alias + "." + md0.rows + "()"] : [];
   }
+  const taken = new Set(l.names);
+  const [all, dis] = [fresh_name("fzall", taken), fresh_name("fzdis", taken)];
   const block = (name: string, rows: string[]): string =>
     "def " + name + "() -> IO(Unit):\n  do IO<Unit>:\n" + rows.concat(["IO.pure(Unit, Unit{})"]).map((r) => "    " + r).join("\n");
-  const rowsOf = (md: Mod): string[] => ["w" + String(md.i) + " : Unit <- " + md.alias + "." + md.rows + "()",
+  const call = (md: Mod): string => (md.file ? md.alias + "." : "") + md.rows + "()";
+  const rowsOf = (md: Mod): string[] => ["w" + String(md.i) + " : Unit <- " + call(md),
     ...md.twice === null ? [] : ["w" + String(md.i) + "t : Unit <- IO.print(U32.show(" + md.twice.alias + "." + md.m.resultName + "()))"]];
   const dying = l.mods.filter((md) => member_dies(md.m));
   const rest = l.mods.filter((md) => !member_dies(md.m)).flatMap(rowsOf).concat(l.mainRows);
@@ -4925,23 +4813,22 @@ function module_main(l: Layout): string[] {
     return [block("main", rest)];
   }
   const RES = "Result<&1, &1, U32 & String, String>";
-  const sel = (j: number): string => "fzsel" + String(j) + "(String.eq(s, \"" + String(dying[j].i) + "\"), s)";
-  const defs = [block("fzall", rest)];
-  for (const md of dying) {
-    defs.push(block("fzm" + String(md.i), rowsOf(md)));
-  }
+  const sels = dying.map(() => fresh_name("fzsel", taken));
+  const sel = (j: number): string => sels[j] + "(String.eq(s, \"" + String(dying[j].i) + "\"), s)";
+  const defs = [block(all, rest)];
+  // the selector chain, last link first: no forward references
   for (let j = dying.length - 1; j >= 0; j--) {
-    defs.push("def fzsel" + String(j) + "(z: Bool, +s: String) -> IO(Unit):\n  match z:\n    case True{}:\n      fzm" + String(dying[j].i)
-      + "()\n    case False{}:\n      " + (j + 1 < dying.length ? sel(j + 1) : "fzall()"));
+    defs.push("def " + sels[j] + "(z: Bool, +s: String) -> IO(Unit):\n  match z:\n    case True{}:\n      " + call(dying[j])
+      + "\n    case False{}:\n      " + (j + 1 < dying.length ? sel(j + 1) : all + "()"));
   }
-  defs.push("def fzdis(r: " + RES + ") -> IO(Unit):\n  match r:\n    case Done{s0}:\n      +s = s0\n      " + sel(0)
-    + "\n    case Fail{e}:\n      fzall()");
-  defs.push("def main() -> IO(Unit):\n  do IO<Unit>:\n    sel : " + RES + " <- IO.get_env(\"FZ_MEMBER\")\n    fzdis(sel)");
+  defs.push("def " + dis + "(r: " + RES + ") -> IO(Unit):\n  match r:\n    case Done{s0}:\n      +s = s0\n      " + sel(0)
+    + "\n    case Fail{e}:\n      " + all + "()");
+  defs.push("def main() -> IO(Unit):\n  do IO<Unit>:\n    sel : " + RES + " <- IO.get_env(\"FZ_MEMBER\")\n    " + dis + "(sel)");
   return defs;
 }
 
-// serial : the layout as a Prog. A hub module's package is named after its
-// final text (a mutation's included): the store keeps what it once took
+// serial : the layout as a Prog. A hub file's package is named after its
+// final text (a clash's included): the store keeps what it once took
 function serial(l: Layout): Prog {
   for (const md of l.mods) {
     if (md.hub !== null) {
@@ -4955,40 +4842,38 @@ function serial(l: Layout): Prog {
   for (const md of l.mods) {
     const at = md.hub === null ? files : hub;
     const root = md.hub === null ? "" : md.hub + "/";
-    at[root + mod_file(md)] = md.text;
+    if (md.file) {
+      at[root + mod_file(md)] = md.text;
+    }
     if (md.m.eff !== null) {
       const d = [...md.dir, md.m.eff.file].join("/");
       at[root + d + ".c"] = md.effC;
       at[root + d + ".js"] = md.effJs;
     }
   }
-  const imports = l.mods.flatMap((md) => ["import " + md.spell + " as " + md.alias,
+  const imports = l.mods.filter((md) => md.file).flatMap((md) => ["import " + md.spell + " as " + md.alias,
     ...md.twice === null ? [] : ["import " + md.twice.spell + " as " + md.twice.alias]]);
-  // a mutation names a module's spelling, known here, as @SPELL<i>@
+  // a clash names a module's spelling, known here, as @SPELL<i>@
   const head = l.entryHead.map((h) => h.replace(/@SPELL(\d+)@/g, (_, i) => l.mods[Number(i)].spell));
-  files[entry] = (l.withBase ? "import Base\n" : "") + [...imports, ...head].join("\n") + "\n\n"
-    + [...l.entryDefs, ...module_main(l)].join("\n\n") + "\n";
-  return { src: "", entry, files, links: l.links, hub };
+  const ms = l.mods.map((md) => md.m);
+  const tag = "# fuzz " + l.spelling + (ms.length > 1 ? " batch of " + String(ms.length) : "") + " seed=" + ms.map((m) => String(m.seed)).join(",");
+  const top = [tag, ...(l.withBase ? ["import Base"] : []), ...imports, ...head].join("\n");
+  const body = [...l.mods.filter((md) => !md.file).map((md) => md.text), ...l.entryDefs, ...main_defs(l)].filter((b) => b !== "");
+  files[entry] = top + "\n\n" + body.join("\n\n") + "\n";
+  const one = Object.keys(files).length === 1 && Object.keys(hub).length === 0 && Object.keys(l.links).length === 0 && l.entryDir.length === 0;
+  return one ? { src: files[entry] } : { src: "", entry, files, links: l.links, hub };
 }
 
-// mod_key : how a worker names a module's def: its file and the def
+// mod_key : how a worker names a member's def: bare in the entry, else its
+// file and the def
 function mod_key(md: Mod, name: string): string {
-  return (md.hub === null ? "" : "@lib/" + md.hub + "/") + mod_file(md) + "::" + name;
+  return !md.file ? name : (md.hub === null ? "" : "@lib/" + md.hub + "/") + mod_file(md) + "::" + name;
 }
 
-// module_seed : a member laid out as a module (not a show member, whose
-// main is its own)
-function module_seed(seed: bigint): boolean {
-  return !show_seed(seed) && seed_roll(seed, 0x4dn) < MODULE_PCT;
-}
-
-// prog_of : a group's program in its layout, the layout too (a group is one
-// layout: batches never mix them); key names a member's def to the worker
-function prog_of(ms: Member[], spelling: Spelling): { p: Prog; l: Layout | null; key: (i: number, n: string) => string } {
-  if (!module_seed(ms[0].seed)) {
-    return { p: flat(ms, spelling), l: null, key: (_, n) => n };
-  }
-  const l = modules(ms, spelling);
+// prog_of : a group's program, its layout too; key names a member's def to
+// the worker
+function prog_of(ms: Member[], spelling: Spelling, filed = false): { p: Prog; l: Layout; key: (i: number, n: string) => string } {
+  const l = layout(ms, spelling, filed);
   return { p: serial(l), l, key: (i, n) => mod_key(l.mods[i], n) };
 }
 
@@ -5221,13 +5106,10 @@ function clash_new(g: Gen, l: Layout): Clash | null {
   return null;
 }
 
-function clash_seed(seed: bigint): boolean {
-  return !show_seed(seed) && seed_roll(seed, 0xc1n) < CLASH_PCT;
-}
-
-// clash_test : the member's clash, run to its failure
-async function clash_test(m: Member): Promise<Verdict | null> {
-  const l = modules([m], "sealed");
+// clash_test : the member's clash, run to its refusal: the check or
+// emission must refuse it, or every compiled lane must
+async function clash_test(m: Member, lanes: Lanes, mode: Mode): Promise<Verdict | null> {
+  const l = layout([m], "sealed", true);
   const c = clash_new(new Gen(rng_mix64(m.seed ^ 0xc1a5n)), l);
   if (c === null) {
     return null;
@@ -5235,11 +5117,11 @@ async function clash_test(m: Member): Promise<Verdict | null> {
   feat_tally["clash-" + c.kind] = (feat_tally["clash-" + c.kind] ?? 0) + 1;
   const p = serial(l);
   const text = prog_text(p);
-  const w = await phase("worker:clash", () => pool.run(p, c.mode === "check" ? "check" : "emit"));
-  const found = (kind: string, why: string): Verdict => {
-    save_finding(m.seed, kind, ["clash=" + c.kind, "want=" + String(c.want), why], text, c.kind + ": " + why.split("\n")[0]);
+  const found = (kind: string, why: string, dir?: string): Verdict => {
+    save_finding(m.seed, kind, ["clash=" + c.kind, "want=" + String(c.want), why], text, c.kind + ": " + why.split("\n")[0], lanes, dir, mode);
     return { kind: "fail", fkind: kind, why };
   };
+  const w = await phase("worker:clash", () => pool.run(p, c.mode === "check" ? "check" : "emit"));
   if (w.verdict === "skip") {
     return { kind: "skip", note: "clash-" + (w.stage ?? "?") };
   }
@@ -5248,55 +5130,40 @@ async function clash_test(m: Member): Promise<Verdict | null> {
     if (w.verdict === "ok") {
       return found("clash-accepted", "the " + c.mode + " stage accepted it");
     }
-    if (!c.want.test(err)) {
-      return found(w.verdict === "crash" && c.mode === "check" ? "clash-crash" : "clash-other", err);
-    }
-    return null;
+    return c.want.test(err) ? null : found(w.verdict === "crash" && c.mode === "check" ? "clash-crash" : "clash-other", err);
   }
   if (w.verdict !== "ok") {
     return found("clash-other", err);
   }
-  if (CHECK_ONLY) {
-    return null;
-  }
-  const dir = fs.mkdtempSync(path.join(TMP, "c-"));
+  const r = await compiled(w, [{ label: "", env: undefined, exp: { refuse: c.want }, transLines: [] }], lanes, "fzc" + String(m.seed), 1, mode);
   try {
-    const base = "fzc" + String(m.seed);
-    const cc = await leg_cc(dir, base, w.csrc ?? "", [], base, CC_TIMEOUT);
-    if (cc.skip === true) {
-      return { kind: "skip", note: "clash-cc-timeout" };
+    if (r.skip !== null) {
+      return { kind: "skip", note: "clash-" + r.skip };
     }
-    if (!cc.ok) {
-      return found("clash-other", cc.why ?? "cc failed");
-    }
-    const crun = await leg_run(path.join(dir, base), ["--threads", "1", "--gpu", "off"], dir, RUN_TIMEOUT);
-    const jsf = path.join(dir, base + ".js");
-    fs.writeFileSync(jsf, w.jssrc ?? "");
-    const jrun = await leg_run(process.execPath, [jsf], dir, RUN_TIMEOUT);
-    for (const [lane, r] of [["C", crun], ["JS", jrun]] as const) {
-      if (r.code === 0 || !c.want.test(r.err)) {
-        return found(r.code === 0 ? "clash-accepted" : "clash-other", lane + " exit " + String(r.code) + ": " + (r.err || r.out).slice(0, 500));
-      }
-    }
+    return r.fail === null ? null : found(/got exit 0\b/.test(r.fail) ? "clash-accepted" : "clash-other", r.fail, r.dir);
   } finally {
-    if (!KEEP) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    fs.rmSync(r.dir, { recursive: true, force: true });
   }
-  return null;
 }
 
 // Worker
 // ------
 // `fuzz.ts --worker`: JSON-line protocol on stdin/stdout. The worker
 // imports bend.ts/comp.ts once, seeds a checked base book once, and per
-// request clones it, parses the program source, validates, and either
-// evaluates the requested defs on the interpreter (term_snf, decoding
-// each U32 Word chain) or emits the C and JS sources. Verdicts: reject
-// (the checker refused), skip (resource limit), crash (an internal error
-// on a checked program — a finding), ok.
+// request clones it, loads the program, validates it, checks its template
+// instance table, and either evaluates the requested defs on the
+// interpreter (term_snf, answering each normal form as term_show prints
+// it) or emits the C and JS sources. Verdicts: reject (the checker
+// refused), skip (resource limit), crash (an internal error on a checked
+// program — a finding), ok.
+//
+// The template table: a live closed call T(~a, ..) is the instance keyed by
+// term_key of its arguments. Distinct keys must name distinct instances,
+// every instance must exist, and a key must hold its literals exactly (a
+// Lit that JSON cannot carry — NaN, an infinity, an unsafe integer —
+// would alias two instances). Every generated template call meets it.
 
-type WorkerMode = "interp" | "show" | "emit" | "check";
+type WorkerMode = "eval" | "emit" | "check";
 type WorkerReq = { id: number; src: string; mode: WorkerMode; defs?: string[]; prog?: Prog };
 type WorkerRes = {
   id: number;
@@ -5310,10 +5177,45 @@ type WorkerRes = {
   ms?: number;
 };
 
-// worker_decode : read a decimal out of the shown normal form — a closed
-// U32 prints as its literal
-function worker_decode(shown: string): string | null {
-  return /^\d+$/.test(shown) ? shown : null;
+// tmps_check : the template table's invariants (see above), or null
+function tmps_check(book: { tlds: Record<string, unknown>; tmps: Record<string, Record<string, string>> }): string | null {
+  const owner = new Map<string, string>();
+  const lossy = (x: unknown): boolean => {
+    if (Array.isArray(x)) {
+      return x.some(lossy);
+    }
+    if (typeof x !== "object" || x === null) {
+      return false;
+    }
+    const o = x as Record<string, unknown>;
+    if (o.$ === "Lit" && o.k !== "String" && (typeof o.v !== "number" || !Number.isSafeInteger(o.v) || Object.is(o.v, -0))) {
+      return true;
+    }
+    return Object.values(o).some(lossy);
+  };
+  for (const [t, is] of Object.entries(book.tmps)) {
+    for (const [k, inst] of Object.entries(is)) {
+      const prev = owner.get(inst);
+      if (prev !== undefined) {
+        return "instance " + inst + " named by two keys: " + prev.slice(0, 200) + " and " + (t + " " + k).slice(0, 200);
+      }
+      owner.set(inst, t + " " + k);
+      if (book.tlds[inst] === undefined) {
+        return "instance " + inst + " of " + t + " is not in the book";
+      }
+      // one term_key per ~ argument, a line each
+      let parsed: unknown;
+      try {
+        parsed = k.split("\n").map((x) => JSON.parse(x));
+      } catch {
+        return "template key of " + t + " is not term_key lines: " + k.slice(0, 300);
+      }
+      if (lossy(parsed)) {
+        return "template key of " + t + " holds a literal JSON cannot carry: " + k.slice(0, 300);
+      }
+    }
+  }
+  return null;
 }
 
 async function worker_main(): Promise<void> {
@@ -5482,12 +5384,17 @@ async function worker_main(): Promise<void> {
       reply({ id: req.id, verdict: "reject", err: checked.err });
       return;
     }
-    const book = checked.book;
+    const book = checked.book as { tlds: Record<string, unknown>; tmps: Record<string, Record<string, string>> };
+    const tmpl = tmps_check(book);
+    if (tmpl !== null) {
+      reply({ id: req.id, verdict: "crash", stage: "template-key", err: tmpl });
+      return;
+    }
     if (req.mode === "check") {
       reply({ id: req.id, verdict: "ok" });
       return;
     }
-    if (req.mode === "interp" || req.mode === "show") {
+    if (req.mode === "eval") {
       const t0 = performance.now();
       const outs: string[] = [];
       for (const def of req.defs ?? []) {
@@ -5502,12 +5409,7 @@ async function worker_main(): Promise<void> {
           }
           return;
         }
-        const dec = req.mode === "show" ? shown : worker_decode(shown);
-        if (dec === null) {
-          reply({ id: req.id, verdict: "crash", stage: "interp-stuck", err: "not a closed U32: " + shown.slice(0, 300), def });
-          return;
-        }
-        outs.push(dec);
+        outs.push(shown);
       }
       reply({ id: req.id, verdict: "ok", outs, ms: Math.round(performance.now() - t0) });
       return;
@@ -5678,7 +5580,7 @@ function leg_exec(cmd: string, args: string[], cwd: string, timeout: number, env
   });
 }
 
-const CC_FLAGS = [OPT, "-std=c11", "-w", "-fno-slp-vectorize"];
+const CC_FLAGS = ["-std=c11", "-w", "-fno-slp-vectorize"];
 
 type LegOut = { kind: "ok" | "skip" | "fail"; out: string; err: string; code: number; why?: string };
 
@@ -5712,12 +5614,31 @@ function gpu_serial<A>(f: () => Promise<A>): Promise<A> {
   return res;
 }
 
+// Lanes : what a group's compiled legs run under, drawn from its first seed:
+// the C-PAR thread count and the clang -O level (--threads / --opt
+// override them, as a finding isolated out of a batch's repro line does)
+type Lanes = { threads: number; opt: number };
+
+function group_lanes(seed: bigint): Lanes {
+  const g = new Gen(rng_mix64(seed ^ 0x1a4e5n));
+  const threads = g.pick([2, 3, 4, 8, 16]);
+  const opt = g.wpick<number>([[2, 0], [4, 1], [3, 2], [1, 3]]);
+  return { threads: THREADS_ARG !== "" ? Number(THREADS_ARG) : threads, opt: OPT_ARG !== "" ? Number(OPT_ARG) : opt };
+}
+
+// group_size : how many seeds the group a seed heads merges
+function group_size(seed: bigint): number {
+  return new Gen(rng_mix64(seed ^ 0xba7cn)).wpick<number>([[1, 1], [2, 4], [5, 8], [2, 16]]);
+}
+
 // Compare
 // -------
 // cmp_expect : the sequential C leg against the generator's own
 // expectations (null lines are cross-leg-only). cmp_legs : any other leg
 // against the sequential reference, with the trans policy on the extra
-// lines.
+// lines. A refusal (a clash) is every lane's own expectation.
+
+type Want = Expect | { refuse: RegExp };
 
 // lines_of : non-empty lines of a leg's stream
 function lines_of(s: string): string[] {
@@ -5731,7 +5652,11 @@ function exit_diff(want: number, got: LegOut, what: string): string | null {
   return "exit: " + what + " " + String(want) + ", got " + String(got.code) + (got.err.trim() !== "" ? " (stderr: " + got.err.trim().slice(0, 400) + ")" : "");
 }
 
-function cmp_expect(exp: Expect, got: LegOut): string | null {
+function cmp_expect(exp: Want, got: LegOut): string | null {
+  if ("refuse" in exp) {
+    return got.code !== 0 && exp.refuse.test(got.err) ? null
+      : "expected a refusal matching " + String(exp.refuse) + ", got exit " + String(got.code) + ": " + (got.err || got.out).slice(0, 500);
+  }
   const ed = exit_diff(exp.code, got, "expected");
   if (ed !== null) {
     return ed;
@@ -5779,14 +5704,165 @@ function cmp_legs(refr: LegOut, got: LegOut, transLines: number[], soft: boolean
   return { diff: null, ulp: false };
 }
 
+// RunSpec : one execution of a binary — its environment, what it must do,
+// and the stdout line indexes owned by trans-flagged members' extra lines
+type RunSpec = { label: string; env: Env; exp: Want; transLines: number[] };
+
+// known : a lane's failure is a reviewed limit of that lane (a skip once it
+// is attributed to one member): the device holds no F32.show or F32.read
+// (a bang reaching one fail-stops), and a JS string holds Unicode scalar
+// values only (a Char past U+10FFFF or a surrogate, which Base's Chr{x}
+// and the C runtime take, fail-stops the JS runtime)
+type Compiled = { fail: string | null; skip: string | null; ulp: boolean; dir: string; known?: string };
+
+const SEQ_LIMITS: Array<[RegExp, string]> = [
+  [/memory fault/, "resource-fault"],
+  [/a Nat past the largest immediate/, "nat-immediate"],
+];
+
+const KNOWN_LIMITS: Array<[RegExp, RegExp, string]> = [
+  [/^(METAL|CUDA)/, /a function the device does not hold/, "host-only"],
+  [/^JS/, /is not a Unicode scalar value/, "js-char-scalar"],
+];
+
+// compiled : the emitted C and JS through every compiled lane. C-SEQ runs
+// each RunSpec against its expectation; JS, C-PAR and the GPU lanes run it
+// against C-SEQ's output (a refusal against its own). The build directory
+// is the caller's to keep or remove.
+async function compiled(w: WorkerRes, runs: RunSpec[], lanes: Lanes, base: string, members: number, mode: Mode = LOUD): Promise<Compiled> {
+  const dir = fs.mkdtempSync(path.join(TMP, "g-"));
+  const out = (r: Partial<Compiled>): Compiled => ({ fail: null, skip: null, ulp: false, dir, ...r });
+  const cap = RUN_TIMEOUT * Math.max(1, members);
+  const opt = "-O" + String(lanes.opt);
+  const cpu = path.join(dir, base + "_cpu");
+  const cc = await leg_cc(dir, base, w.csrc ?? "", [opt], base + "_cpu", CC_TIMEOUT);
+  if (cc.skip === true) {
+    return out({ skip: cc.why ?? "cc-timeout" });
+  }
+  if (!cc.ok) {
+    return out({ fail: cc.why ?? "cc failed" });
+  }
+  const jsf = path.join(dir, base + ".js");
+  fs.writeFileSync(jsf, w.jssrc ?? "");
+  const seqs: LegOut[] = [];
+  for (const r of runs) {
+    const seq = await phase("run:seq", () => leg_run(cpu, ["--threads", "1", "--gpu", "off"], dir, cap, r.env));
+    if (seq.why !== undefined) {
+      return out({ fail: "C-SEQ" + r.label + " " + seq.why });
+    }
+    const d = cmp_expect(r.exp, seq);
+    if (d !== null) {
+      // a runtime limit every compiled leg hits alike is a skip, JS
+      // confirming it: memory exhausted (a loop doubling its state), or a
+      // Nat past the runtimes' 48-bit immediate (the spec's Nat is unbounded)
+      const lim = SEQ_LIMITS.find(([re]) => re.test(seq.err));
+      if (lim !== undefined) {
+        const js = await leg_run(process.execPath, [path.join(dir, base + ".js")], dir, cap, r.env);
+        if (js.code !== 0 && lim[0].test(js.err)) {
+          return out({ skip: lim[1] });
+        }
+      }
+      return out({ fail: "C-SEQ" + r.label + " vs expectation: " + d });
+    }
+    seqs.push(seq);
+  }
+  let ulp = false;
+  let known: { fail: string; known: string } | null = null;
+  // limit : a lane failure that is a known limit is noted and the other
+  // lanes still run; any other failure ends the group
+  const limit = (f: string | null): string | null => {
+    const k = f === null ? undefined : KNOWN_LIMITS.find(([l, m]) => l.test(f) && m.test(f));
+    if (f === null || k === undefined) {
+      return f;
+    }
+    known = known ?? { fail: f, known: (/^(METAL|CUDA)/.exec(f)?.[1]?.toLowerCase() ?? "") + (k[2] === "host-only" ? "-host-only" : k[2]) };
+    return null;
+  };
+  // lane : one more leg, every run against its reference
+  const lane = async (label: string, soft: boolean, run: (env: Env) => Promise<LegOut>): Promise<string | null> => {
+    for (let i = 0; i < runs.length; i++) {
+      const got = await run(runs[i].env);
+      if (got.why !== undefined) {
+        return label + runs[i].label + " " + got.why;
+      }
+      const exp = runs[i].exp;
+      if ("refuse" in exp) {
+        const d = cmp_expect(exp, got);
+        if (d !== null) {
+          return label + runs[i].label + " vs expectation: " + d;
+        }
+        continue;
+      }
+      const d = cmp_legs(seqs[i], got, runs[i].transLines, soft);
+      if (d.diff !== null) {
+        return label + runs[i].label + " vs C-SEQ: " + d.diff;
+      }
+      ulp = ulp || d.ulp;
+    }
+    return null;
+  };
+  const js = limit(await lane("JS", true, (env) => phase("run:js", () => leg_run(process.execPath, [jsf], dir, cap, env))));
+  if (js !== null) {
+    return out({ fail: js });
+  }
+  const par = await lane("C-PAR(" + String(lanes.threads) + ")", false,
+    (env) => phase("run:par", () => leg_run(cpu, ["--threads", String(lanes.threads), "--gpu", "off"], dir, cap * 2, env)));
+  if (par !== null) {
+    return out({ fail: par });
+  }
+  // GPU lanes: the same .c rebuilt with the platform flags, run --gpu on,
+  // strictly one program at a time
+  const gpus: Array<[boolean, string, string[], string]> = [
+    [WITH_METAL, "METAL", ["-DBEND_METAL=1", "-x", "objective-c", "-fobjc-arc", "-framework", "Metal", "-framework", "Foundation"], base + "_mtl"],
+    [WITH_CUDA, "CUDA", ["-DBEND_CUDA=1", "-I/usr/local/cuda/include", "-L/usr/local/cuda/lib64", "-Wl,-rpath,/usr/local/cuda/lib64", "-lcuda", "-lnvrtc"], base + "_cud"],
+  ];
+  for (const [on, label, flags, bin] of gpus) {
+    if (!on || !mode.gpu) {
+      continue;
+    }
+    const lname = label.toLowerCase();
+    const got = await gpu_serial(async (): Promise<Partial<Compiled>> => {
+      const gc = await leg_cc(dir, base, w.csrc ?? "", [opt, ...flags], bin, GPU_CC_TIMEOUT);
+      if (gc.skip === true) {
+        return { skip: lname + "-cc-timeout" };
+      }
+      if (!gc.ok) {
+        return { fail: label + " " + (gc.why ?? "cc failed") };
+      }
+      // the device program is built once beside the binary, as `bend -o`
+      // does; a launch without it compiles and says so on stderr
+      const gb = await phase("gpu-build", () => leg_exec(path.join(dir, bin), ["--gpu-build"], dir, GPU_CC_TIMEOUT));
+      if (gb.timeout) {
+        return { skip: lname + "-build-timeout" };
+      }
+      if (!gb.ok) {
+        // a refusal may come at the device build, before any run
+        const refuse = runs.every((r) => "refuse" in r.exp && r.exp.refuse.test(gb.err + gb.out));
+        return refuse ? {} : { fail: label + " GPU BUILD FAILURE:\n" + (gb.err + gb.out).slice(0, 2000) };
+      }
+      const f = limit(await lane(label, true, (env) => phase("run:" + lname, () => leg_run(path.join(dir, bin), ["--gpu", "on"], dir, GPU_RUN_TIMEOUT * Math.max(1, members), env))));
+      return f !== null ? { fail: f } : {};
+    });
+    if (got.skip !== undefined || got.fail !== undefined) {
+      return out({ ...got, ulp });
+    }
+  }
+  return out({ ulp, ...(known ?? {}) });
+}
+
 // Save
 // ----
 
-// QUIET : the reducer's trials neither save nor announce
-let QUIET = false;
+// Mode : how a test runs. The reducer's trials are quiet (neither save nor
+// announce) and skip the GPU lanes when the failure they keep is not on
+// one; everything else is loud. Per call: a reduction runs beside the groups
+// still in flight.
+type Mode = { quiet: boolean; gpu: boolean };
 
-function save_file(sub: string, seed: bigint, header: string[], src: string, suffix = ""): string {
-  if (QUIET) {
+const LOUD: Mode = { quiet: false, gpu: true };
+
+function save_file(sub: string, seed: bigint, header: string[], src: string, suffix = "", mode: Mode = LOUD): string {
+  if (mode.quiet) {
     return "";
   }
   const dir = sub === "" ? FINDINGS : path.join(FINDINGS, sub);
@@ -5797,20 +5873,24 @@ function save_file(sub: string, seed: bigint, header: string[], src: string, suf
   return f;
 }
 
-// save_finding : persist the program with its verdict header and exact
-// repro line, and announce it; head is the one-line summary printed
-function repro_line(seed: bigint): string {
-  const flags = (THREADS > 0 ? " --threads " + String(THREADS) : "")
-    + (WITH_METAL ? " --metal" : "") + (WITH_CUDA ? " --cuda" : "")
-    + (MODULE_PCT !== 25 ? " --module-pct " + String(MODULE_PCT) : "")
-    + (EFFECT_PCT !== 25 ? " --effect-pct " + String(EFFECT_PCT) : "")
-    + (CLASH_PCT !== 15 ? " --clash-pct " + String(CLASH_PCT) : "");
+// repro_line : the command that re-runs one seed; the lanes it ran under
+// are named when they are not the seed's own
+function repro_line(seed: bigint, lanes?: Lanes): string {
+  const own = group_lanes(seed);
+  const flags = (WITH_METAL ? " --metal" : "") + (WITH_CUDA ? " --cuda" : "") + (IO_PCT !== 20 ? " --io-pct " + String(IO_PCT) : "")
+    + (lanes !== undefined && lanes.threads !== own.threads ? " --threads " + String(lanes.threads) : "")
+    + (lanes !== undefined && lanes.opt !== own.opt ? " --opt " + String(lanes.opt) : "");
   return "repro: bun " + import.meta.filename + " 1 --seed " + String(seed) + flags;
 }
 
-function save_finding(seed: bigint, kind: string, detail: string[], src: string, head: string): string {
-  const f = save_file("", seed, ["FUZZ FINDING kind=" + kind, repro_line(seed), ...detail], src);
-  if (!QUIET) {
+// save_finding : persist the program with its verdict header and exact
+// repro line (and its build, when one ran), and announce it
+function save_finding(seed: bigint, kind: string, detail: string[], src: string, head: string, lanes?: Lanes, dir?: string, mode: Mode = LOUD): string {
+  const f = save_file("", seed, ["FUZZ FINDING kind=" + kind, repro_line(seed, lanes), ...detail], src, "", mode);
+  if (!mode.quiet) {
+    if (dir !== undefined && fs.existsSync(dir)) {
+      fs.cpSync(dir, path.join(FINDINGS, "seed-" + String(seed) + ".build"), { recursive: true });
+    }
     console.log("\nFINDING " + kind + " seed=" + String(seed) + "\n  " + head + "\n  -> " + f);
   }
   return f;
@@ -5841,10 +5921,11 @@ function tally_feats(feats: string[]): void {
 
 // Test
 // ----
-// One group = one compiled program (a batch, or a solo member). The
-// interp legs run per member on solo-assembled siblings; the compiled
-// legs run on the merged program; any compiled failure re-runs members
-// solo for attribution.
+// One group = one compiled program (a batch, or a solo member). The interp
+// legs run per member on solo layouts; the compiled legs run on the merged
+// program; any compiled failure re-runs members solo, under the group's
+// lanes, for attribution. A member whose profile draws a clash is then
+// checked as the program that must be refused.
 
 const UID_STRIDE = 1_000_000;
 
@@ -5854,79 +5935,65 @@ type MemberState = {
   want: string | null;
 };
 
-// member_interp : the raw/sealed interpreter differential for one member
-// — one book holding both spellings, each def evaluated by its own worker
-// request in parallel (evaluation is the cost; parsing and checking the
-// book is ~5ms); answers the raw value (the compiled reference) or a
-// verdict. A reject is attributed by re-checking the raw spelling alone:
-// raw-reject is a generator bug, generator-reject a broken seal.
-async function member_interp(ms: MemberState): Promise<void> {
+// member_interp : the interpreter leg for one member: the raw and sealed
+// results evaluated in parallel requests on one book (evaluation is the
+// cost; parsing and checking is ~5ms), or a show member's main. Answers
+// the value the compiled legs must print, or a verdict. A reject is
+// attributed by re-checking the raw spelling alone: raw-reject is a
+// generator bug, generator-reject a broken seal.
+async function member_interp(ms: MemberState, mode: Mode): Promise<void> {
   const m = ms.m;
-  if (m.show !== null) {
-    const src = assemble([m], "sealed");
-    const w = await phase("worker:show", () => pool.run(flat([m], "sealed"), "show", ["main"]));
-    if (w.verdict === "reject" || w.verdict === "crash") {
-      const kind = w.verdict === "reject" ? "raw-reject" : "raw-crash";
-      const error = w.err ?? "";
-      save_finding(m.seed, kind, ["stage=" + (w.stage ?? "check"), error], src, failure_head(error));
-      ms.verdict = { kind: "fail", fkind: kind, why: error };
-      return;
-    }
-    if (w.verdict === "skip") {
-      save_file("skipped", m.seed, ["SKIPPED reason=raw-" + (w.stage ?? "?"), w.err ?? ""], src);
-      ms.verdict = { kind: "skip", note: "raw-" + (w.stage ?? "?") };
-      return;
-    }
-    ms.want = (w.outs?.[0] ?? "").trim();
-    return;
-  }
-  const both = prog_of([m], "both");
+  const show = m.show !== null;
+  const both = prog_of([m], show ? "sealed" : "both");
   const src = prog_text(both.p);
-  const [oracle, w] = await Promise.all([
-    phase("worker:raw", () => pool.run(both.p, "interp", [both.key(0, m.rawName)])),
-    phase("worker:sealed", () => pool.run(both.p, "interp", [both.key(0, m.resultName)])),
-  ]);
+  const defs = show ? ["main"] : [both.key(0, m.rawName), both.key(0, m.resultName)];
+  const ws = await Promise.all(defs.map((d, i) => phase(i === 0 ? "worker:raw" : "worker:sealed", () => pool.run(both.p, "eval", [d]))));
   const fail = (kind: string, detail: string[], prog: string, head: string, why = head): void => {
-    save_finding(m.seed, kind, detail, prog, head);
+    save_finding(m.seed, kind, detail, prog, head, undefined, undefined, mode);
     ms.verdict = { kind: "fail", fkind: kind, why };
   };
+  const oracle = ws[0];
   if (oracle.verdict === "reject") {
+    const error = oracle.err ?? "";
+    if (show) {
+      fail("raw-reject", ["stage=check", error], src, failure_head(error), error);
+      return;
+    }
     const rawp = prog_of([m], "raw").p;
-    const raw = prog_text(rawp);
     const r = await phase("worker:check", () => pool.run(rawp, "check"));
     const kind = r.verdict === "ok" ? "generator-reject" : "raw-reject";
-    const error = oracle.err ?? "";
-    fail(kind, ["stage=check", error], kind === "raw-reject" ? raw : src, failure_head(error), error);
+    fail(kind, ["stage=check", error], kind === "raw-reject" ? prog_text(rawp) : src, failure_head(error), error);
     return;
   }
-  for (const [x, kind] of [[oracle, "raw-crash"], [w, "interp-crash"]] as const) {
+  for (const [x, kind] of ws.map((w, i) => [w, i === 0 ? "raw-crash" : "interp-crash"] as const)) {
     if (x.verdict === "crash") {
-      fail(kind, ["stage=" + (x.stage ?? "?"), x.err ?? ""], src, (x.err ?? "").split("\n")[0]);
+      fail(kind, ["stage=" + (x.stage ?? "?"), x.err ?? ""], src, (x.err ?? "").split("\n")[0], x.err ?? "");
       return;
     }
   }
-  if (oracle.verdict === "skip" || w.verdict === "skip") {
-    const why = oracle.verdict === "skip" ? "raw-" + (oracle.stage ?? "?") : (w.stage ?? "?");
-    save_file("skipped", m.seed, ["SKIPPED reason=" + why, (oracle.verdict === "skip" ? oracle.err : w.err) ?? ""], src);
+  const skipped = ws.find((w) => w.verdict === "skip");
+  if (skipped !== undefined) {
+    const why = (skipped === oracle ? "raw-" : "") + (skipped.stage ?? "?");
+    save_file("skipped", m.seed, ["SKIPPED reason=" + why, skipped.err ?? ""], src, "", mode);
     ms.verdict = { kind: "skip", note: why };
     return;
   }
-  const want = (oracle.outs?.[0] ?? "").trim();
-  const got = (w.outs?.[0] ?? "").trim();
-  if (got !== want) {
-    fail("seal-diverge", ["raw interp:    " + want, "sealed interp: " + got], src, "raw=" + want + " sealed=" + got);
+  const outs = ws.map((w) => (w.outs?.[0] ?? "").trim());
+  if (!show && !/^\d+$/.test(outs[0])) {
+    fail("interp-stuck", ["not a closed U32: " + outs[0].slice(0, 300)], src, "not a closed U32");
     return;
   }
-  ms.want = want;
+  if (!show && outs[1] !== outs[0]) {
+    fail("seal-diverge", ["raw interp:    " + outs[0], "sealed interp: " + outs[1]], src, "raw=" + outs[0] + " sealed=" + outs[1]);
+    return;
+  }
+  ms.want = outs[0];
 }
 
-// RunSpec : one execution of the batch binary — its environment, what it
-// must print, and the stdout line indexes owned by trans-flagged members'
-// extra lines. group_runs: the plain run over the non-dying members, then
-// one run per dying member selected by FZ_MEMBER.
-type RunSpec = { label: string; env: Env; exp: Expect; transLines: number[] };
-
-function group_runs(states: MemberState[], twice: Set<Member> = new Set()): RunSpec[] {
+// group_runs : the plain run over the members that live, then one run
+// per dying member, selected by FZ_MEMBER; twice: members a second alias
+// prints again
+function group_runs(states: MemberState[], twice: Set<Member>): RunSpec[] {
   const plain = group_expect(states.filter((s) => !member_dies(s.m)), twice);
   const runs: RunSpec[] = [{ label: "", env: undefined, ...plain }];
   states.forEach((s, i) => {
@@ -5937,7 +6004,7 @@ function group_runs(states: MemberState[], twice: Set<Member> = new Set()): RunS
   return runs;
 }
 
-function group_expect(states: MemberState[], twice: Set<Member> = new Set()): { exp: Expect; transLines: number[] } {
+function group_expect(states: MemberState[], twice: Set<Member>): { exp: Expect; transLines: number[] } {
   const out: Array<string | null> = [];
   const err: string[] = [];
   const transLines: number[] = [];
@@ -5959,140 +6026,38 @@ function group_expect(states: MemberState[], twice: Set<Member> = new Set()): { 
   return { exp: { out, err, code }, transLines };
 }
 
-async function group_compiled(states: MemberState[], solo: boolean): Promise<{ fail: string | null; skip: string | null; err?: string; batch?: string; ulp: boolean }> {
-  const live = states.filter((s) => s.verdict === null);
-  if (live.length === 0) {
-    return { fail: null, skip: null, ulp: false };
-  }
-  // The emitters deliberately require Base to supply their runtime types.
-  // A no-Base book still goes through the same generator, checker and
-  // interpreter; there is no applicable compiled leg for that environment.
-  if (!live[0].m.withBase) {
-    return { fail: null, skip: null, ulp: false };
-  }
+// group_compiled : the group's program emitted and through every compiled
+// lane. A show program's value is its one line. Without Base there is no
+// compiled leg: the emitters take their runtime types from Base.
+async function group_compiled(live: MemberState[], solo: boolean, lanes: Lanes, mode: Mode): Promise<{ fail: string | null; skip: string | null; err?: string; batch: string; ulp: boolean; dir?: string; known?: string }> {
   const members = live.map((s) => s.m);
+  if (live.length === 0) {
+    return { fail: null, skip: null, batch: "", ulp: false };
+  }
   const prog = prog_of(members, "sealed");
   const src = prog_text(prog.p);
+  for (const md of prog.l.mods) {
+    tally_feats(["layout-" + (md.file ? "file" : "inline"), ...md.hub !== null ? ["layout-hub"] : [],
+      ...md.twice !== null ? ["layout-twice"] : [], ...md.file && Object.keys(prog.l.links).length > 0 ? ["layout-link"] : []]);
+  }
+  if (!members[0].withBase) {
+    return { fail: null, skip: null, batch: src, ulp: false };
+  }
   const w = await phase("worker:emit", () => pool.run(prog.p, "emit"));
   if (w.verdict === "skip") {
     return { fail: null, skip: w.stage ?? "emit-skip", err: w.err, batch: src, ulp: false };
   }
   if (w.verdict !== "ok") {
-    return { fail: "EMIT " + w.verdict + " (" + (w.stage ?? "?") + "): " + (w.err ?? "").split("\n").slice(0, 3).join(" "), skip: null, ulp: false };
+    return { fail: "EMIT " + w.verdict + " (" + (w.stage ?? "?") + "): " + (w.err ?? "").split("\n").slice(0, 3).join(" "), skip: null, batch: src, ulp: false };
   }
-  if (CHECK_ONLY) {
-    return { fail: null, skip: null, ulp: false };
-  }
-  const runs = group_runs(live, new Set((prog.l?.mods ?? []).filter((md) => md.twice !== null).map((md) => md.m)));
-  const base = "fz" + String(members[0].seed) + (solo ? "s" : "b");
-  const dir = fs.mkdtempSync(path.join(TMP, "g-"));
-  const fail = (why: string): { fail: string; skip: null; ulp: boolean } => ({ fail: why, skip: null, ulp: false });
-  let ulp = false;
-  try {
-    const cap = RUN_TIMEOUT * Math.max(1, members.length);
-    const cpu = path.join(dir, base + "_cpu");
-    // C sequential: the compiled reference, every run against its expectation
-    const cc = await leg_cc(dir, base, w.csrc ?? "", [], base + "_cpu", CC_TIMEOUT);
-    if (cc.skip === true) {
-      return { fail: null, skip: cc.why ?? "cc-timeout", ulp: false };
-    }
-    if (!cc.ok) {
-      return fail(cc.why ?? "cc failed");
-    }
-    const seqs: LegOut[] = [];
-    for (const r of runs) {
-      const seq = await phase("run:seq", () => leg_run(cpu, ["--threads", "1", "--gpu", "off"], dir, cap, r.env));
-      if (seq.why !== undefined) {
-        return fail("C-SEQ" + r.label + " " + seq.why);
-      }
-      const d = cmp_expect(r.exp, seq);
-      if (d !== null) {
-        return fail("C-SEQ" + r.label + " vs expectation: " + d);
-      }
-      seqs.push(seq);
-    }
-    // lane : one more leg, every run against its sequential reference
-    const lane = async (label: string, soft: boolean, run: (env: Env) => Promise<LegOut>): Promise<string | null> => {
-      for (let i = 0; i < runs.length; i++) {
-        const got = await run(runs[i].env);
-        if (got.why !== undefined) {
-          return label + runs[i].label + " " + got.why;
-        }
-        const d = cmp_legs(seqs[i], got, runs[i].transLines, soft);
-        if (d.diff !== null) {
-          return label + runs[i].label + " vs C-SEQ: " + d.diff;
-        }
-        ulp = ulp || d.ulp;
-      }
-      return null;
-    };
-    const jsf = path.join(dir, base + ".js");
-    fs.writeFileSync(jsf, w.jssrc ?? "");
-    const js = await lane("JS", true, (env) => phase("run:js", () => leg_run(process.execPath, [jsf], dir, cap, env)));
-    if (js !== null) {
-      return fail(js);
-    }
-    if (THREADS > 0) {
-      const par = await lane("C-PAR", false, (env) => phase("run:par", () => leg_run(cpu, ["--threads", String(THREADS), "--gpu", "off"], dir, cap * 2, env)));
-      if (par !== null) {
-        return fail(par);
-      }
-    }
-    // GPU lanes: the same .c rebuilt with the platform flags, run --gpu on,
-    // strictly one program at a time
-    const gpu = (label: string, flags: string[], bin: string): Promise<{ skip?: string; fail?: string }> => gpu_serial(async () => {
-      const lname = label.toLowerCase();
-      const gc = await leg_cc(dir, base, w.csrc ?? "", flags, bin, GPU_CC_TIMEOUT);
-      if (gc.skip === true) {
-        return { skip: gc.why ?? lname + "-cc-timeout" };
-      }
-      if (!gc.ok) {
-        return { fail: label + " " + (gc.why ?? "cc failed") };
-      }
-      // the device program is built once beside the binary, as `bend -o`
-      // does; a launch without it compiles and says so on stderr
-      const gb = await phase("gpu-build", () => leg_exec(path.join(dir, bin), ["--gpu-build"], dir, GPU_CC_TIMEOUT));
-      if (gb.timeout) {
-        return { skip: lname + "-build-timeout" };
-      }
-      if (!gb.ok) {
-        return { fail: label + " GPU BUILD FAILURE:\n" + (gb.err + gb.out).slice(0, 2000) };
-      }
-      const f = await lane(label, true, (env) => phase("run:" + lname, () => leg_run(path.join(dir, bin), ["--gpu", "on"], dir, GPU_RUN_TIMEOUT * Math.max(1, members.length), env)));
-      // the device holds no F32.show or F32.read: a bang reaching one
-      // fail-stops there by design, a known limit rather than a finding
-      if (f !== null && /a function the device does not hold/.test(f)) {
-        return { skip: lname + "-host-only" };
-      }
-      return f !== null ? { fail: f } : {};
-    });
-    const lanes: Array<[boolean, string, string[], string]> = [
-      [WITH_METAL, "METAL", ["-DBEND_METAL=1", "-x", "objective-c", "-fobjc-arc",
-        "-framework", "Metal", "-framework", "Foundation"], base + "_mtl"],
-      [WITH_CUDA, "CUDA", ["-DBEND_CUDA=1", "-I/usr/local/cuda/include", "-L/usr/local/cuda/lib64",
-        "-Wl,-rpath,/usr/local/cuda/lib64", "-lcuda", "-lnvrtc"], base + "_cud"],
-    ];
-    for (const [on, label, flags, bin] of lanes) {
-      if (!on) {
-        continue;
-      }
-      const got = await gpu(label, flags, bin);
-      if (got.skip !== undefined) {
-        return { fail: null, skip: got.skip, ulp };
-      }
-      if (got.fail !== undefined) {
-        return { fail: got.fail, skip: null, ulp };
-      }
-    }
-  } finally {
-    if (!KEEP) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  }
-  return { fail: null, skip: null, ulp };
+  const runs: RunSpec[] = members[0].show !== null
+    ? [{ label: "", env: undefined, exp: { out: [live[0].want], err: [], code: 0 }, transLines: [] }]
+    : group_runs(live, new Set(prog.l.mods.filter((md) => md.twice !== null).map((md) => md.m)));
+  const r = await compiled(w, runs, lanes, "fz" + String(members[0].seed) + (solo ? "s" : "b"), members.length, mode);
+  return { ...r, batch: src };
 }
 
-async function test_group(seeds: bigint[], solo: boolean): Promise<Verdict[]> {
+async function test_group(seeds: bigint[], solo: boolean, lanes: Lanes, mode: Mode = LOUD): Promise<Verdict[]> {
   const states: MemberState[] = seeds.map((sd, k) => {
     const m = phase_sync("gen", () => gen_member(sd, solo ? 0 : k * UID_STRIDE));
     return { m, verdict: null, want: null };
@@ -6100,64 +6065,68 @@ async function test_group(seeds: bigint[], solo: boolean): Promise<Verdict[]> {
   for (const s of states) {
     tally_feats(s.m.feats);
   }
-  return test_members(states, solo);
+  return test_members(states, solo, lanes, mode);
 }
 
 // test_members : run the legs over already-generated members
-async function test_members(states: MemberState[], solo: boolean): Promise<Verdict[]> {
-  const grouped = states;
-  await Promise.all(grouped.map((s) => member_interp(s)));
-  const res = await group_compiled(grouped, solo);
-  if (res.skip !== null) {
-    for (const s of grouped) {
-      if (s.verdict === null) {
-        save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip, res.err ?? ""], prog_text(prog_of([s.m], "sealed").p));
-        if (res.batch !== undefined && res.batch !== prog_text(prog_of([s.m], "sealed").p)) {
-          save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip + " (the batch that skipped)", res.err ?? ""], res.batch, "-batch");
+async function test_members(states: MemberState[], solo: boolean, lanes: Lanes, mode: Mode = LOUD): Promise<Verdict[]> {
+  await Promise.all(states.map((s) => member_interp(s, mode)));
+  const live = states.filter((s) => s.verdict === null);
+  const res = await group_compiled(live, solo, lanes, mode);
+  try {
+    if (res.known !== undefined && solo) {
+      live[0].verdict = { kind: "skip", note: res.known };
+    } else if (res.skip !== null) {
+      for (const s of live) {
+        const own = prog_text(prog_of([s.m], "sealed").p);
+        save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip, res.err ?? ""], own, "", mode);
+        if (res.batch !== own) {
+          save_file("skipped", s.m.seed, ["SKIPPED reason=" + res.skip + " (the batch that skipped)", res.err ?? ""], res.batch, "-batch", mode);
         }
         s.verdict = { kind: "skip", note: res.skip };
       }
-    }
-  } else if (res.fail !== null && solo) {
-    const s = grouped[0];
-    const kind = res.fail.startsWith("EMIT") ? "compiler-crash"
-      : /COMPILE FAILURE/.test(res.fail) ? "cc-fail"
-      : /TIMEOUT/.test(res.fail) ? "leg-timeout" : "leg-diverge";
-    save_finding(s.m.seed, kind, [res.fail], prog_text(prog_of([s.m], "sealed").p), res.fail.split("\n")[0]);
-    s.verdict = { kind: "fail", fkind: kind, why: res.fail };
-  } else if (res.fail !== null) {
-    // attribute: re-run each member alone at uid base 0, so whatever it
-    // saves reproduces under a bare --seed
-    console.log("\nbatch of " + String(grouped.length) + " failed, isolating: " + res.fail.split("\n")[0]);
-    let blamed = false;
-    for (const s of grouped) {
-      if (s.verdict !== null) {
-        continue;
+    } else if (res.fail !== null && solo) {
+      const s = live[0];
+      const kind = res.fail.startsWith("EMIT") ? "compiler-crash"
+        : /COMPILE FAILURE/.test(res.fail) ? "cc-fail"
+        : /TIMEOUT/.test(res.fail) ? "leg-timeout" : "leg-diverge";
+      save_finding(s.m.seed, kind, [res.fail], res.batch, res.fail.split("\n")[0], lanes, res.dir, mode);
+      s.verdict = { kind: "fail", fkind: kind, why: res.fail };
+    } else if (res.fail !== null) {
+      // attribute: re-run each member alone at uid base 0 under the same
+      // lanes, so whatever it saves reproduces under its repro line
+      if (!mode.quiet) {
+        console.log("\nbatch of " + String(live.length) + " failed, isolating: " + res.fail.split("\n")[0]);
       }
-      const v = await test_group([s.m.seed], true);
-      s.verdict = v[0];
-      if (v[0].kind === "fail") {
-        blamed = true;
+      let blamed = false;
+      for (const s of live) {
+        const v = await test_group([s.m.seed], true, lanes, mode);
+        s.verdict = v[0];
+        blamed = blamed || v[0].kind === "fail" || (res.known !== undefined && v[0].note === res.known);
+      }
+      if (!blamed) {
+        save_finding(live[0].m.seed, "batch-only",
+          ["no member fails alone — the MERGE or whole-book emission is at fault", res.fail,
+            "members: " + live.map((s) => String(s.m.seed)).join(" ")], res.batch,
+          String(live.length) + " members: " + res.fail.split("\n")[0], lanes, res.dir, mode);
+        live[0].verdict = { kind: "fail", fkind: "batch-only", why: res.fail };
       }
     }
-    if (!blamed) {
-      save_finding(grouped[0].m.seed, "batch-only",
-        ["no member fails alone — the MERGE or whole-book emission is at fault", res.fail,
-          "members: " + grouped.map((s) => String(s.m.seed)).join(" ")], prog_text(prog_of(grouped.map((s) => s.m), "sealed").p),
-        String(grouped.length) + " members: " + res.fail.split("\n")[0]);
-      grouped[0].verdict = { kind: "fail", fkind: "batch-only", why: res.fail };
+  } finally {
+    if (res.dir !== undefined) {
+      fs.rmSync(res.dir, { recursive: true, force: true });
     }
   }
   if (res.ulp) {
-    for (const s of grouped) {
+    for (const s of live) {
       if (s.verdict === null && s.m.trans) {
         s.verdict = { kind: "skip", note: "trans-ulp" };
       }
     }
   }
   for (const s of states) {
-    if (s.verdict === null && clash_seed(s.m.seed)) {
-      s.verdict = await clash_test(s.m);
+    if (s.verdict === null && s.m.prof.clash) {
+      s.verdict = await clash_test(s.m, lanes, mode);
     }
   }
   for (const s of states) {
@@ -6165,15 +6134,21 @@ async function test_members(states: MemberState[], solo: boolean): Promise<Verdi
       s.verdict = { kind: "ok" };
     }
   }
+  if (solo && !mode.quiet && states[0].verdict?.kind === "fail") {
+    await reduce_auto(states[0].m, states[0].verdict, lanes);
+  }
   return states.map((s) => s.verdict as Verdict);
 }
 
 // Reduce
 // ------
-// Greedy delta reduction of one seed's failing program: drop result and
-// extra statements (their binds read as 0 downstream), the extra def, the
-// IO tail, then every entry nothing needs, keeping a change while the
-// same failure signature holds. Legs run exactly as in a solo test.
+// Every solo finding is reduced as it is saved: a greedy delta reduction
+// of its member (drop result and extra statements, their binds read as 0
+// downstream, the extra def, the IO tail, the effect, then every entry
+// nothing needs) keeping a change while the same failure signature holds,
+// under the same lanes. The result lands beside the finding as
+// seed-N.min.bend. The first two findings of a signature are reduced; the
+// rest are the same class.
 
 // fail_sig : the failure's identity — its finding kind, plus the first
 // message line with digits masked for crashes and rejects (values in a
@@ -6189,61 +6164,88 @@ function fail_sig(v: Verdict): string | null {
       .slice(0, 3).join(" | ").replace(/[0-9]+/g, "#");
     return kind + ":" + diagnostic;
   }
-  const exact = /crash|reject|cc-fail/.test(kind);
+  const exact = /crash|reject|cc-fail|clash/.test(kind);
   return kind + (exact ? ":" + (v.why ?? "").split("\n")[0].replace(/[0-9]+/g, "#") : "");
 }
 
-async function reduce_run(seed: bigint): Promise<void> {
-  const sig = async (m: Member): Promise<string | null> =>
-    fail_sig((await test_members([{ m, verdict: null, want: null }], true))[0]);
-  const size = (m: Member): string => String(m.lines.length) + "+" + String(m.xlines.length) + " statements, "
-    + String(m.entries.length) + " entries" + (m.tail !== null ? ", io tail" : "");
-  let m = gen_member(seed, 0);
-  const want = await sig(m);
-  if (want === null) {
-    console.log("seed " + String(seed) + " passes: nothing to reduce");
+const REDUCED = new Map<string, number>();
+
+async function reduce_auto(m0: Member, v: Verdict, lanes: Lanes): Promise<void> {
+  const want = fail_sig(v);
+  // the budget is per class: the kind and the head of its message, values
+  // masked (the signature a reduction keeps is coarser: values shift)
+  const cls = (v.fkind ?? "") + ":" + (v.why ?? "").split("\n")[0].replace(/"[^"]*"/g, "\"\"").replace(/[0-9]+/g, "#").slice(0, 60);
+  if (want === null || (REDUCED.get(cls) ?? 0) >= 2 || /^clash/.test(want)) {
     return;
   }
-  console.log("reducing seed=" + String(seed) + " [" + want + "]: " + size(m));
-  QUIET = true;
-  const keep = async (m2: Member): Promise<boolean> => {
-    const ok = (await sig(m2)) === want;
-    if (ok) {
-      m = m2;
-    }
-    return ok;
-  };
-  for (let pass = 1, changed = true; changed; pass++) {
-    changed = false;
-    for (const which of ["lines", "xlines"] as const) {
-      for (let i = m[which].length - 1; i >= 0; i--) {
-        changed = (await keep(member_drop(m, which, i))) || changed;
+  REDUCED.set(cls, (REDUCED.get(cls) ?? 0) + 1);
+  const mode: Mode = { quiet: true, gpu: /^(METAL|CUDA)/.test(v.why ?? "") };
+  const sig = async (m: Member): Promise<string | null> =>
+    fail_sig((await test_members([{ m, verdict: null, want: null }], true, lanes, mode))[0]);
+  let m = m0;
+  let tries = 0;
+  {
+    const keep = async (m2: Member): Promise<boolean> => {
+      tries++;
+      const ok = (await sig(m2)) === want;
+      if (ok) {
+        m = m2;
+      }
+      return ok;
+    };
+    for (let changed = true; changed && tries < 400;) {
+      changed = false;
+      for (const which of ["lines", "xlines"] as const) {
+        for (let i = m[which].length - 1; i >= 0; i--) {
+          changed = (await keep(member_drop(m, which, i))) || changed;
+        }
+      }
+      if (m.extraName !== null) {
+        changed = (await keep({ ...m, extraName: null, xlines: [], xfold: "" })) || changed;
+      }
+      if (m.tail !== null) {
+        changed = (await keep({ ...m, tail: null })) || changed;
+      }
+      if (m.eff !== null) {
+        changed = (await keep({ ...m, eff: null })) || changed;
+      }
+      for (let i = m.entries.length - 1; i >= 0; i--) {
+        changed = (await keep({ ...m, entries: m.entries.filter((_, j) => j !== i) })) || changed;
       }
     }
-    if (m.extraName !== null) {
-      changed = (await keep({ ...m, extraName: null, xlines: [], xfold: "" })) || changed;
-    }
-    if (m.tail !== null) {
-      changed = (await keep({ ...m, tail: null })) || changed;
-    }
-    for (let i = m.entries.length - 1; i >= 0; i--) {
-      changed = (await keep({ ...m, entries: m.entries.filter((_, j) => j !== i) })) || changed;
-    }
-    console.log("pass " + String(pass) + ": " + size(m));
   }
-  QUIET = false;
-  const f = save_file("", seed, ["FUZZ REDUCED kind=" + want, repro_line(seed),
-    "reduced by --reduce: the same failure on this program"], prog_text(prog_of([m], "sealed").p), ".min");
-  console.log("-> " + f);
+  const f = save_file("", m.seed, ["FUZZ REDUCED kind=" + want, repro_line(m.seed, lanes),
+    "reduced from the finding beside it: the same failure on this program (" + String(tries) + " trials)"], prog_text(prog_of([m], "sealed").p), ".min");
+  console.log("  reduced -> " + f);
 }
 
 // Fuzz
 // ----
 
+// FEATURES : what a run is expected to reach; the ones it never did are
+// listed at its end (Base's registry adds one per def: base:<name>)
+const FEATURES = ["qpoly-def", "qpoly-call", "kind-qvar", "kind-meet", "adt-data", "adt-qpoly", "adt-type",
+  "erased-field", "erased-param", "f32", "f32-arith", "f32-trans", "f32-conv", "nat-table", "peel",
+  "array-ops", "array-sugar", "array-lit", "array-write", "map-ops", "container-pair", "string-append",
+  "match-adt", "do-maybe", "do-result", "fork", "bang", "def", "rec", "loop", "match-multi", "wild", "match-nest", "state",
+  "ret-tup", "io-def", "rec-io", "do-io", "match-nat", "match-bool", "match-cmp", "match-str", "match-char", "match-tup",
+  "arr-param", "plus-rebind", "eql", "rwt", "thm", "eqkit", "eq-sym", "eq-cong", "eq-trans", "partial", "io-tail",
+  "fam-nat", "fam-bool", "fam-enum", "fam-use", "fam-unfold", "fam-mk", "fam-rd", "fam-cast", "adt-indexed",
+  "sig", "sig-value", "empty", "eql-clash", "eql-ne", "refute", "dep-param", "dep-call", "law-where", "law-exs", "or", "pair",
+  "template", "template-arg", "template-def", "f32-bits", "f32-showread", "f32-show", "u32-showread", "io-try",
+  "async", "fiber", "timer", "chan", "async-batch", "effect", "effect-free-name",
+  "seal-add", "seal-xor", "seal-dist", "seal-mask", "seal-cmp", "seal-rot",
+  "plus-pat", "cons-pat", "list-pat", "list-lit", "plus-par", "plus-lam", "plus-do", "do-let", "plus-tup",
+  "do-step", "cons-lit", "str-escape", "read-bytes", "file-io", "get-env", "print-err", "io-die", "twins", "dup", "reuse", "clo",
+  "show", "show-adt", "show-tup", "show-str", "show-arr", "no-base", "with-base", "free-name", "name-affix", "shadow",
+  "syntax-ann", "syntax-beta", "syntax-rewrite", "syntax-erased-let", "syntax-ctor-let", "syntax-inline", "syntax-inline-default",
+  "unsafe", "assert-def", "hof", "absurd", "deaddef", "big", "stretch",
+  "layout-inline", "layout-file", "layout-hub", "layout-link", "layout-twice"];
+
 async function fuzz_run(): Promise<void> {
-  if (cli_flag("--dump") || cli_flag("--dump-raw")) {
-    const m = gen_member(BASE_SEED, 0);
-    process.stdout.write(prog_text(prog_of([m], cli_flag("--dump-raw") ? "raw" : "sealed").p));
+  await base_registry_load();
+  if (cli_flag("--dump")) {
+    process.stdout.write(prog_text(prog_of([gen_member(BASE_SEED, 0)], "both").p));
     return;
   }
   fs.mkdirSync(FINDINGS, { recursive: true });
@@ -6265,57 +6267,43 @@ async function fuzz_run(): Promise<void> {
     console.error("--metal needs macOS");
     process.exit(1);
   }
-  pool = new Pool(Number(cli_opt("--pool", String(Math.max(2, Math.min(10, JOBS * 2))))));
-  if (REDUCE !== "") {
-    try {
-      await reduce_run(BigInt(REDUCE));
-    } finally {
-      pool.close();
-      if (!KEEP) {
-        fs.rmSync(TMP, { recursive: true, force: true });
-      }
+  pool = new Pool(Math.max(2, Math.min(10, JOBS * 2)));
+  // a first ^C stops launching and lets the groups in flight finish
+  let deadline = DEADLINE;
+  process.on("SIGINT", () => {
+    if (deadline === 0) {
+      process.exit(130);
     }
-    return;
-  }
-  // smoke : hand-verified per-feature cover (re-pick after any edit that
-  // remaps seeds: each seed passes solo and the union covers smoke_need)
-  const smoke = [82986n, 82854n, 17411n, 5519n, 84982n, 6886n, 4846n,
-    2275n, 4269n, 370n, 3829n, 21160n, 186n, 261n];
-  const fixed = SMOKE ? smoke : null;
-  const count = fixed?.length ?? COUNT;
-  const lanes = "interp+cseq+js" + (THREADS > 0 ? "+par" + String(THREADS) : "") + (WITH_METAL ? "+metal" : "") + (WITH_CUDA ? "+cuda" : "");
-  console.log("bend2 fuzz: count=" + String(count) + (LOOP ? " (loop)" : "") + " seed=" + String(BASE_SEED)
-    + " jobs=" + String(JOBS) + " batch=" + String(BATCH) + " legs=" + lanes
-    + (SMOKE ? " +smoke" : "") + (CHECK_ONLY ? " +check-only" : ""));
+    deadline = 0;
+    console.log("\nstopping: the groups in flight finish (^C again to quit now)");
+  });
+  const legs = "interp+cseq+js+par" + (WITH_METAL ? "+metal" : "") + (WITH_CUDA ? "+cuda" : "");
+  console.log("bend2 fuzz: " + (COUNT_UNIT !== undefined ? "for " + COUNT_ARG : "count=" + String(COUNT)) + " seed=" + String(BASE_SEED)
+    + " jobs=" + String(JOBS) + " legs=" + legs + " io-pct=" + String(IO_PCT) + " registry=" + String(BASE_DEFR.length) + " base defs");
   const t0 = performance.now();
   let seed = BASE_SEED;
   let done = 0;
   let launched = 0;
+  let last = 0;
   const inflight = new Set<Promise<void>>();
-  const total = (): number => (LOOP && fixed === null ? Infinity : count);
-  while (done < total()) {
-    while (inflight.size < JOBS && launched < total()) {
+  const more = (): boolean => launched < COUNT && Date.now() < deadline;
+  const status = (): string => String(done) + " done, " + (done / ((performance.now() - t0) / 1000)).toFixed(1) + "/s, ok=" + String(tally.ok)
+    + " skip=" + String(tally.skip) + " FAIL=" + String(tally.fail);
+  while (more() || inflight.size > 0) {
+    while (inflight.size < JOBS && more()) {
+      const head = seed;
+      const size = standalone(head) ? 1 : group_size(head);
       const batch: bigint[] = [];
-      while (batch.length < BATCH && launched < total()) {
-        const next = fixed?.[launched] ?? seed;
-        // A pure-main book, an empty initial environment, or unrestricted
-        // top-level names owns its whole book. Close the current batch first.
-        if (standalone_seed(next) && batch.length > 0) {
+      while (batch.length < size && more()) {
+        // a seed that owns its program closes the group before it
+        if (standalone(seed) && batch.length > 0) {
           break;
         }
-        if (batch.length > 0 && module_seed(next) !== module_seed(batch[0])) {
-          break;
-        }
-        batch.push(next);
-        if (fixed === null) {
-          seed = rng_step(seed);
-        }
+        batch.push(seed);
+        seed = rng_step(seed);
         launched++;
-        if (standalone_seed(next)) {
-          break;
-        }
       }
-      const p = test_group(batch, batch.length === 1)
+      const p = test_group(batch, batch.length === 1, group_lanes(head))
         .then((vs) => {
           for (const v of vs) {
             tally[v.kind]++;
@@ -6329,12 +6317,13 @@ async function fuzz_run(): Promise<void> {
           console.log("\nFUZZER ERROR seeds=" + batch.map(String).join(",") + ": " + String(e instanceof Error ? e.stack ?? e.message : e));
         })
         .finally(() => {
-          const was = done;
           done += batch.length;
           inflight.delete(p);
-          if (Math.floor(done / 25) > Math.floor(was / 25)) {
-            const dt = (performance.now() - t0) / 1000;
-            process.stdout.write("\r" + String(done) + " done, " + (done / dt).toFixed(1) + "/s, ok=" + String(tally.ok) + " skip=" + String(tally.skip) + " FAIL=" + String(tally.fail) + "   ");
+          if (process.stdout.isTTY) {
+            process.stdout.write("\r" + status() + "   ");
+          } else if (performance.now() - last > 60_000) {
+            last = performance.now();
+            console.log("[" + new Date().toISOString() + "] " + status());
           }
         });
       inflight.add(p);
@@ -6344,39 +6333,20 @@ async function fuzz_run(): Promise<void> {
     }
   }
   pool.close();
-  if (!KEEP) {
-    fs.rmSync(TMP, { recursive: true, force: true });
-  }
+  fs.rmSync(TMP, { recursive: true, force: true });
   const dt = (performance.now() - t0) / 1000;
   console.log("\n\n" + String(done) + " programs in " + dt.toFixed(1) + "s (" + (done / dt).toFixed(1) + "/s)");
   console.log("ok=" + String(tally.ok) + " skip=" + String(tally.skip) + " FAIL=" + String(tally.fail));
-  const feats = Object.entries(feat_tally).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + "=" + String(v)).join(" ");
-  console.log("features: " + feats);
-  if (PROFILE) {
-    phase_report();
-  }
+  console.log("features: " + Object.entries(feat_tally).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + "=" + String(v)).join(" "));
+  phase_report();
   if (Object.keys(skip_why).length > 0) {
     console.log("skips: " + Object.entries(skip_why).map(([k, v]) => k + "=" + String(v)).join(" "));
   }
-  const smoke_need = ["qpoly-def", "qpoly-call", "kind-qvar", "kind-meet", "adt-data", "adt-qpoly",
-    "erased-field", "erased-param", "f32-arith", "f32-trans", "f32-conv", "nat-table", "peel",
-    "array-ops", "map-ops", "string-append", "match-adt", "do-maybe", "do-result", "fork", "bang",
-    "def", "rec", "loop", "match-multi", "wild", "match-nest", "state", "ret-tup", "io-def", "rec-io", "do-io",
-    "match-nat", "match-bool", "match-cmp", "match-str", "match-char", "match-tup", "arr-param", "string-eq", "plus-rebind",
-    "eql", "rwt", "thm", "ford", "share", "partial", "io-tail",
-    "fam-nat", "fam-bool", "fam-enum", "fam-use", "fam-unfold", "fam-mk", "fam-rd", "adt-indexed",
-    "sig", "sig-value", "empty", "eql-clash", "eql-ne", "refute", "dep-param", "dep-call", "law-where", "or", "pair",
-    "template", "f32-bits", "f32-showread", "f32-show", "map-del", "map-keys", "map-from-list", "set-del", "list-map", "io-try",
-    "async", "fiber", "timer", "chan",
-    "seal-add", "seal-xor", "seal-dist", "seal-mask", "seal-cmp", "seal-rot",
-    "plus-pat", "cons-pat", "list-pat", "plus-par", "plus-lam", "plus-do", "do-let", "plus-tup",
-    "array-lit", "array-write", "do-step", "cons-lit", "str-escape", "read-bytes", "twins",
-    "show", "show-adt", "show-tup", "show-str", "show-arr"];
-  const smoke_miss = SMOKE ? smoke_need.filter((f) => feat_tally[f] === undefined) : [];
-  if (smoke_miss.length > 0) {
-    console.log("smoke missing features: " + smoke_miss.join(" "));
+  const never = FEATURES.concat(BASE_DEFR.map((d) => "base:" + d.name)).filter((f) => feat_tally[f] === undefined);
+  if (never.length > 0) {
+    console.log("never reached: " + never.join(" "));
   }
-  if (tally.fail > 0 || (SMOKE && tally.skip > 0) || smoke_miss.length > 0) {
+  if (tally.fail > 0) {
     console.log("findings in " + FINDINGS);
     process.exit(1);
   }
