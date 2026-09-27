@@ -37,9 +37,10 @@ Each open class has an issue on `bendlang/bend`; the ones filed on
    match's next row. `parse_array_set_swallows_row.bend`. Rechecked on
    2.0.32: open.
 6. **A large string literal overflows both emitters** (found by the port),
-   #1127. `-o` on a 24 KB literal fails with "the machine stack overflowed";
-   the check and the interpreter pass. `string_big_gen.py`. Rechecked on
-   2.0.32: open.
+   #1127, closed as won't fix under WONTFIX #993 (the implementation
+   recurses on the machine stack; no issue per overflow). `-o` on a 24 KB
+   literal fails with "the machine stack overflowed"; the check and the
+   interpreter pass. `string_big_gen.py`.
 7. **A pure main showing an Array of ((U32, D), Unit) and one more such
    pair faults in C** (`leg-diverge`), #1129. C prints the array, a garbage
    U32, then "memory fault (machine stack overflow?)"; the interpreter and
