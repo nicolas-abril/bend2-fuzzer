@@ -4,9 +4,9 @@
 harness, 12k lines of Bend. `fuzz.sh` builds it with `bend -o` and runs it
 from a bend2-core checkout. It does not import bend: every leg is a process
 (the `bend` CLI for the interpreter and the emitters, clang, the compiled
-binary, bun on the emitted JS). This file keeps the two lists the port
-produced: the limitations of Bend it met (and how the code works around
-each), and the known bugs of the bend2-core toolchain.
+binary, bun on the emitted JS). This file lists the limitations of
+Bend the port met and how the code works around each; `../BUGS.md` lists
+the bugs of bend2-core.
 
 ## Limitations met while porting
 
@@ -124,58 +124,8 @@ since fixed.
 
 ## Known bugs of bend2-core
 
-Open, with the fuzzer's finding kind; repros under `../repros/` unless
-noted.
-
-1. **An open Array element type** (`compiler-crash`): an Array whose
-   element type is an equality, or reaches the emitters open (Base's Array
-   helpers called at a type variable), kills both emitters with "an open
-   Array element type"; the checker and the interpreter accept it
-   (`comp_array_of_equality.bend`). The port's first 1,000 seeds found it
-   again (seed 7141).
-2. **An Object.prototype name reads as an import alias** (`raw-reject`,
-   new): a declared name whose first segment is a property of JavaScript's
-   `Object.prototype` (`__defineSetter__`, `constructor`, `toString`, ...)
-   is refused with "a fresh name (__defineSetter__ is an import's alias)"
-   in a program with no import: the aliases live in a plain object. Found
-   by the TypeScript fuzzer on `af569d48`, seed 15733518094780353156:
-   `type __defineSetter__._ZrMc is Data: ..`.
-3. **F1 `Bool.or`/`||` and `Bool.xor` in C** (`leg-diverge`): the C
-   emitter reads a boxed Bool Term as a native 0/1 (the `bool_` intrinsic
-   template) (`comp_bool_or_boxed_operand.bend`, `..._scrutinee.bend`,
-   `comp_bool_xor_boxed_operand.bend`).
-4. **F2 a namespace equal to a Base prefix captures names**
-   (`raw-reject`): a file named `Word.bend` resolves bare names into Base's
-   (`Nil` becomes `Word.Nil`) (`ns_base_prefix_capture/`).
-5. **F4 an alias equal to the file's own namespace is ambiguous**
-   (`raw-reject`): `import ./m.bend as m` then `m.f()`
-   (`alias_is_own_namespace/`).
-6. **F5 a nested match with a later list-literal row** (`raw-reject`):
-   refused as "an undestructed scrutinee"
-   (`check_nested_match_later_literal.bend`).
-7. **F6 `Array.set(..);` swallows the next row** (`raw-reject`): it
-   parses as the write statement `a = a[i] <- v; ..`, eating an inline
-   match's next row (`parse_array_set_swallows_row.bend`).
-8. **family-arm-layout** (`compiler-crash`): a family whose arms have
-   different runtime layouts, read per arm after a match on the index,
-   dies in the C emitter with "a layout mismatch" or "a constructor outside
-   its layout" (`comp_family_arm_layout_sig.bend` and three more).
-9. **K1 `F32.show` tie rounding** (`leg-diverge`): C prints `417.70312`,
-   JS `417.70313`.
-10. **K a list literal of hundreds of calls** is slow to emit (15.7 s of
-    user time for the repro).
-11. **The compiler's stack overflows on a large string literal** (found by
-    the port): `-o` on a 22 KB literal fails with "the machine stack
-    overflowed (a deep recursion, or a literal too large to expand)".
-12. **`Nat.read` never finishes in the interpreter**: its overflow guard
-    divides with Base's unary `Nat.divmod`, an accumulator loop, so no
-    digit is observable before 2^48 steps; the registry keeps it off the
-    interpreter's side.
-13. **F3 Apple clang 17 at `-O0`** (`cc-fail`, not Bend's): "live register
-    clobbered by inserted prologue instructions"; the legs pass
-    `-fno-stack-check`.
-
-Reviewed limits, counted as skips: `js-char-scalar` (a Char past U+10FFFF
-or a surrogate stops the JS runtime), `nat-immediate` (a Nat past 2^48-1
-stops both runtimes), `resource-fault` (memory exhausted on every leg),
-`metal-host-only` (a `!` reaching `F32.show` or `F32.read` on the GPU).
+`../BUGS.md` lists every bend2-core bug class the fuzzer has found, open
+and fixed, rechecked against bend2-core `af569d48`. The port met these
+open ones: an open Array element type (seed 7141), an alias equal to the
+file's own namespace (seeds 20781 and 20795), and the compiler's stack
+overflow on a large string literal (building its own Base table).

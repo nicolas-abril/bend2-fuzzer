@@ -144,7 +144,7 @@ sh ../bend2-fuzzer/bend/fuzz.sh [count | duration] [--seed N] [options]
 runtime's threads) and `--jobs N` (groups in flight per process, default
 3). Seeds are 32-bit and a group's seeds are consecutive. Findings land in
 `findings-bend/` unless `FZ_FINDINGS` says otherwise. `bend/PORT.md` lists
-the limitations of Bend the port met and the known bugs of bend2-core;
+the limitations of Bend the port met;
 `bend/tools/` holds the scripts that generate its records (`st.py`,
 `regen.py`), copy the Base table (`table.py`) and mark reusable binders
 (`plus.py`).
@@ -167,7 +167,8 @@ saved program is the durable artifact.
 
 ## Notes
 
-`NOTES.md` holds the maintainer notes: invariants, probed language rules,
-the currently-open compiler bug classes (expected finding noise), and the
-validation recipe. The long doc comment at the top of `fuzz.ts` is the
+`BUGS.md` lists every bend2-core bug class the fuzzer has found, open and
+fixed, with its repro. `NOTES.md` holds the maintainer notes: invariants,
+probed language rules, the currently-open compiler bug classes (expected
+finding noise), and the validation recipe. The long doc comment at the top of `fuzz.ts` is the
 design spec proper.
