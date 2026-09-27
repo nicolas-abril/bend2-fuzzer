@@ -359,6 +359,11 @@ An indexed datatype whose constructors are all nullary is no index type
 (`fuzz.ts` would draw it as one; the port's first 3,000 seeds did, seed
 21514). 1,000 seeds from `--seed 7000`: 9.3 seeds/s against `fuzz.ts`'s
 9.2 on the same bend2-core commit.
+Against Bend 2.0.32 (2026-09-27): the CLI's verdicts changed (see
+`bend/PORT.md`), and Base's `Event` gained `Look` and `Scroll`, now in both
+tables (`BASE_TABLE` in `fuzz.ts` and `fuzz.bend`); without them a fifth of
+the seeds were rejected for non-exhaustive matches. 299 of 300 from
+`--seed 60000`, the one finding a C fault (#1129).
 
 Restructured on 2026-09-02:
 

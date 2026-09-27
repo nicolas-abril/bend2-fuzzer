@@ -7,67 +7,64 @@ repository) and the status. **Rechecked** marks a
 status verified on 2026-09-27 against bend2-core `af569d48` (2.0.31) by
 running the repro (check, `-o` to C and JS, clang, the C binary, bun, the
 interpreter); the rest carry the status of the triage that last saw them
-(`NOTES.md`, the `TRIAGE-*.md` files).
+(`NOTES.md`, the `TRIAGE-*.md` files). Statuses marked 2.0.32 were rechecked
+on upstream `d2066a52`.
 
 ## Open
 
-1. **An open Array element type** (`compiler-crash`). An Array whose
-   element type is an equality, or reaches the emitters open (Base's Array
-   helpers called at a type variable), kills both emitters with "an open
-   Array element type"; the checker and the interpreter accept it.
-   `comp_array_of_equality.bend`. Rechecked: open. The Bend port's first
-   1,000 seeds reached it again (seed 7141).
-2. **The bracket wall** (`cc-fail`, class D/K2). One expression of more
-   than 85 nested binary ops: each `U32_BIN` expands to three parenthesis
-   levels and clang stops at 256. `c_bracket_wall_expr.bend`. Rechecked:
-   open. (The let-bound chain of the same class, `c_bracket_wall_chain`,
-   is fixed.)
+Each open class has an issue on `bendlang/bend`; the ones filed on
+2026-09-27 are #1123 to #1130.
+
+1. **An open Array element type** (`compiler-crash`), #1130. An Array
+   whose element type is an equality stops both emitters with "an open
+   Array element type"; the checker accepts it. `comp_array_of_equality.bend`.
+   Rechecked on 2.0.32: open. The port's first 1,000 seeds reached it again
+   (seed 7141).
+2. **The bracket wall** (`cc-fail`, class D/K2), #1123. One expression of
+   86 nested binary ops: each `U32_BIN` expands to three parenthesis levels
+   and clang stops at 256. `c_bracket_wall_expr.bend`. Rechecked on 2.0.32:
+   open. (The let-bound chain of the same class, `c_bracket_wall_chain`, is
+   fixed.)
 3. **A namespace equal to a Base family prefix captures names**
-   (`raw-reject`, F2). A file named `Word.bend` resolves bare names into
-   Base's (`Nil` becomes `Word.Nil`). `ns_base_prefix_capture/`.
-   Rechecked: open.
-4. **An alias equal to the file's own namespace is ambiguous**
-   (`raw-reject`, F4). `import ./m.bend as m`, then `m.f()`: "an
-   unambiguous name (the alias m shadows m.f)". `alias_is_own_namespace/`.
-   Rechecked: open. The Bend port's 3,000-seed validation reached it twice
-   (seeds 20781, 20795).
-5. **A nested match with a later list-literal row** (`raw-reject`, F5).
-   Refused as "an undestructed scrutinee".
-   `check_nested_match_later_literal.bend`. Rechecked: open.
-6. **`Array.set(..);` swallows the next row** (`raw-reject`, F6). The
-   statement parses as the write `a = a[i] <- v; ..` and eats an inline
-   match's next row. `parse_array_set_swallows_row.bend`. Rechecked: open;
-   the diagnostic is now "expected Array<U32>, observed non-inferrable
-   term".
-7. **A large string literal overflows the compiler's stack** (found by the
-   port). `-o` on a program with a 24 KB literal fails with "the machine
-   stack overflowed (a deep recursion, or a literal too large to expand)";
-   the interpreter runs it. A string literal expands to one nested chain.
-   Rechecked: open.
-8. **`F32.show` rounds exact ties differently** (`leg-diverge`, K1): C
-   prints `417.70312`, JS `417.70313`. Open at the 2026-09-24 run; no repro
-   file.
-9. **An arity over 255** (`compiler-crash`). A segment with more than 255
-   live words (a list literal of ~550 calls) overflows the emitter's `u8`
-   arity table (`FID_ARITY_T`) in `compile_tables`. Widening the table to
-   `u16` is the patch. A finding since 2026-09-21; not rechecked.
-10. **A `+` field binder in a braced pattern, then a nested pattern in the
-    same column** (`raw-reject`): "an annotated term (cannot infer)"; the
-    checker's `match_flatten` and the `+` rebinding let. Fix proposed, not
-    applied (2026-09-18, seed 4616053580496162079); not rechecked.
-11. **A `!` reaching `F32.show` or `F32.read` fail-stops on the GPU**
-    ("a function the device does not hold"). The device stubs hold no F32
-    printing or parsing; a compiler fix was proposed (2026-09-18). The
-    fuzzer counts it as the skip `metal-host-only`.
-12. **`Nat.read` never finishes in the interpreter.** Its overflow guard
-    divides with Base's unary `Nat.divmod`, an accumulator loop, so no
-    digit is observable before 2^48 steps; native on the compiled lanes.
-    The fuzzer keeps it off the interpreter's side (open since bend2-core
-    `77eff95`, 2026-09-08).
-13. **A C-SEQ `memory fault` on tiny pure mains** (23 findings on
-    2026-09-16, never reproduced: 300+ reruns of the same binary pass).
-    Fits a first-touch fault of the `MAP_NORESERVE` pool under memory
-    pressure; left open.
+   (`raw-reject`, F2), #1124. In `Word.bend` a bare `Nil{}` resolves to
+   Base's `Word.Nil`, and `String.bend`'s bare `eq` binds `String.eq`.
+   `ns_base_prefix_capture/`. Rechecked on 2.0.32: open.
+4. **A nested match with a later list-literal row** (`raw-reject`, F5),
+   #1125: refused as "an undestructed scrutinee".
+   `check_nested_match_later_literal.bend`. Rechecked on 2.0.32: open.
+5. **`Array.set(..);` swallows the next row** (`raw-reject`, F6), #1126.
+   The statement parses as the write `a = a[i] <- v; ..` and eats an inline
+   match's next row. `parse_array_set_swallows_row.bend`. Rechecked on
+   2.0.32: open.
+6. **A large string literal overflows both emitters** (found by the port),
+   #1127. `-o` on a 24 KB literal fails with "the machine stack overflowed";
+   the check and the interpreter pass. `string_big_gen.py`. Rechecked on
+   2.0.32: open.
+7. **A pure main showing an Array of ((U32, D), Unit) and one more such
+   pair faults in C** (`leg-diverge`), #1129. C prints the array, a garbage
+   U32, then "memory fault (machine stack overflow?)"; the interpreter and
+   JS print the value. Found by the port on 2.0.32 (seed 60052) and reduced
+   to `c_show_pair_array_fault.bend`; 2.0.31 does the same. Likely the
+   2026-09-16 class of unreproduced memory faults and zeroed fields on
+   small pure mains (23 findings then).
+8. **A `!` reaching `F32.show` or `F32.read` fail-stops on the GPU**, #1128:
+   "a function the device does not hold". `metal_f32_show_bang.bend`.
+   Rechecked on 2.0.32: open. The fuzzer counts it as the skip
+   `metal-host-only`.
+9. **An arity over 247** (`compiler-crash`), #1069 (open): a segment with
+   too many live one-word values (a list literal of hundreds of calls)
+   overflows the emitter's arity table. Not rechecked.
+10. **A `+` binder in a nested tuple let: "cannot infer"**, #1077 (open).
+    The braced-pattern form of 2026-09-18 is fixed (#810). Not rechecked.
+
+Closed upstream but seen differently by the fuzzer:
+
+- **`F32.show` rounds exact ties differently** (`leg-diverge`, K1): C
+  prints `417.70312`, JS `417.70313`. #1079, closed as not planned; in
+  WONTFIX ("F32.show's last digit may differ per lane on a decimal tie").
+  The fuzzer should not count it.
+- **`Nat.read` in the interpreter** (#1008, closed): the registry keeps it
+  off the interpreter's side; not rechecked since the fix.
 
 Reviewed runtime limits, counted as skips: `js-char-scalar` (a Char past
 U+10FFFF or a surrogate stops the JS runtime), `nat-immediate` (a Nat past
@@ -76,10 +73,18 @@ U+10FFFF or a surrogate stops the JS runtime), `nat-immediate` (a Nat past
 
 ## Fixed
 
+Fixed in 2.0.32 (rechecked on `d2066a52`):
+
+- **F4, an alias equal to the file's own namespace was ambiguous**
+  (`raw-reject`): `import ./m.bend as m`, then `m.f()`, "an unambiguous
+  name (the alias m shadows m.f)". #1082. `alias_is_own_namespace/`; the
+  port's 3,000-seed validation on 2.0.31 reached it twice.
+
 Rechecked on `af569d48`, the repro now agrees on every lane:
 
 - **F1 `Bool.or`/`||` and `Bool.xor` read a boxed Bool as 0/1 in C**
-  (`leg-diverge`, the most frequent class of the 2026-09-24 run).
+  (`leg-diverge`, the most frequent class of the 2026-09-24 run), #1026
+  and #1093.
   `comp_bool_or_boxed_operand.bend`, `..._scrutinee.bend`,
   `comp_bool_xor_boxed_operand.bend`.
 - **family-arm-layout**: a family whose arms have different runtime
@@ -100,8 +105,8 @@ Rechecked on `af569d48`, the repro now agrees on every lane:
   `comp_intr_bool_layout.bend`.
 - **Metal: a `!` loop next to a forking `!` def computed `%` wrong**
   (`batch-only`). `comp_metal_two_bangs.bend` now prints the C value on
-  the device. The standalone `metal_urem_const/repro.m` is Apple's Metal
-  compiler folding a constant dividend near 2^32.
+  the device (#824). The standalone `metal_urem_const/repro.m` is Apple's
+  Metal compiler folding a constant dividend near 2^32.
 
 Fixed by the record of their triage (each with a regression test in
 bend2-core; the repros predate the 2026-09-05 operator grammar and no

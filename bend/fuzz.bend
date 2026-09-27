@@ -2545,6 +2545,8 @@ def BASE_TABLE?() -> List<&2, String>:
     "  Key{U32, Bool}",
     "  Mouse{U32, U32, U32, Bool}",
     "  Move{U32, U32}",
+    "  Look{F32, F32}",
+    "  Scroll{U32, U32, F32, F32}",
     "  Close{}",
     "type Map<a, -V: Kind(a)> is Kind(a):",
     "  MTip{}",
@@ -10168,9 +10170,10 @@ type VS is Data:
 
 # Cfg : root: the bend2-core checkout (cwd); tmp: the run's scratch
 # directory (its lib/ is the hub store); threads/opt: lane overrides
-# (0 / 9 none)
+# (0 / 9 none); v32: the CLI speaks 2.0.32's verdicts (a refusal under
+# SOME PROOFS FAIL, a check of unsafe code failing as no proof)
 type Cfg is Data:
-  Cfg{root: String, tmp: String, findings: String, io_pct: U32, threads: U32, opt: U32, metal: Bool, jobs: U32, base: Base, bd: BD}
+  Cfg{root: String, tmp: String, findings: String, io_pct: U32, threads: U32, opt: U32, metal: Bool, jobs: U32, base: Base, bd: BD, v32: Bool}
 
 # Run : one process run; errno: 0 it ran, else the spawn failed (a
 # timeout is ETIMEDOUT)
@@ -10293,40 +10296,44 @@ def VS.st?(+r: VS) -> Stats:
   VS{v, st} = r
   st
 
+def Cfg.v32?(+c: Cfg) -> Bool:
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
+  v32
+
 def Cfg.root?(+c: Cfg) -> String:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   root
 
 def Cfg.tmp?(+c: Cfg) -> String:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   tmp
 
 def Cfg.findings?(+c: Cfg) -> String:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   findings
 
 def Cfg.io_pct?(+c: Cfg) -> U32:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   io_pct
 
 def Cfg.metal?(+c: Cfg) -> Bool:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   metal
 
 def Cfg.base?(+c: Cfg) -> Base:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   base
 
 def Cfg.bd?(+c: Cfg) -> BD:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   bd
 
 def Cfg.threads?(+c: Cfg) -> U32:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   threads
 
 def Cfg.opt?(+c: Cfg) -> U32:
-  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd} = c
+  Cfg{root, tmp, findings, io_pct, threads, opt, metal, jobs, base, bd, v32} = c
   opt
 
 def Run.code?(+r: Run) -> U32:
@@ -10642,7 +10649,32 @@ def strip_report?(+ls: List<&2, String>, +in: Bool) -> List<&2, String>:
       If(List<&2, String>, String.starts_with(l, "All terms check"), u => strip_report(t, True{}),
         u => If(List<&2, String>, (in && String.starts_with(l, "- ")), v => strip_report(t, True{}), v => l <> strip_report(t, False{})))
 
-def cli_verdict?(+r: Run, +stage: String) -> Wv:
+def cli_verdict?(+r: Run, +stage: String, +v32: Bool) -> Wv:
+  If(Wv, v32, u => cli_verdict32(r, stage), u => cli_verdict31(r, stage))
+
+# cli_verdict32 : 2.0.32 and on: a refusal is headed SOME PROOFS FAIL, and a
+# check fails as no proof when the program relies on unsafe or foreign
+# code, which is no refusal
+def cli_verdict32?(+r: Run, +stage: String) -> Wv:
+  Run{code, out, err, errno} = r
+  +ls = nonempty(String.lines(err))
+  +fail = String.eq(L.nth(String, "", ls, 0), "SOME PROOFS FAIL")
+  +rest = S.join(L.drop_n(String, ls, 1), "\n")
+  +unsafe = (fail && String.contains(L.nth(String, "", ls, 1), " on unsafe or foreign code:") && all_names(L.drop_n(String, ls, 2)))
+  If(Wv, (Bool.not(U32.is_zero(errno)) || U32.is_zero(code) || unsafe || String.contains(err, "the machine stack overflowed") || String.contains(err, "out of memory") || String.contains(err, "RangeError")),
+    u => cli_verdict31(Bool.pick(Run, unsafe, Run{0, out, "", 0}, r), stage),
+    u => Bool.pick(Wv, fail, Wv{1, out, rest, stage}, Wv{3, out, err, stage}))
+
+def all_names?(+ls: List<&2, String>) -> Bool:
+  match ls:
+    case []:
+      True{}
+    case l <> t:
+      (String.starts_with(l, "- ") && all_names(t))
+
+# cli_verdict31 : before 2.0.32: an error with no check report before it is
+# the checker's refusal
+def cli_verdict31?(+r: Run, +stage: String) -> Wv:
   Run{code, out, err0, errno} = r
   +err = S.join(strip_report(String.lines(err0), False{}), "\n")
   If(Wv, Bool.not(U32.is_zero(errno)), u => Wv{2, out, err, stage ++ "-timeout"},
@@ -10934,7 +10966,7 @@ def member_interp?(+cfg: Cfg, +s: MS, +mode: Mode) -> IO(MSS):
     +t0 : U32 <-now_ms()
     +r : Run <-bend(cfg, [file], WORKER_TIMEOUT())
     +t1 : U32 <-now_ms()
-    +w : Wv = cli_verdict(r, "interp")
+    +w : Wv = cli_verdict(r, "interp", Cfg.v32(cfg))
     +x : Run <-run("rm", ["-rf", dir], 30000)
     +v : MS <-member_interp.go(cfg, s, w, prog_text(p), mode)
     return MSS{v, st.phase("interp", (t1 - t0 : U32))}
@@ -10968,8 +11000,9 @@ def interp.reject?(+cfg: Cfg, +s: MS, +w: Wv, +src: String, +mode: Mode) -> IO(M
     +file : String <-prog_dir(cfg, rawp, dir)
     +r : Run <-If(IO(Run), Mb.is_show(m), u => IO.pure(Run, Run{1, "", "", 0}), u => bend(cfg, [file, "--check-only"], WORKER_TIMEOUT()))
     +x : Run <-run("rm", ["-rf", dir], 30000)
-    +kind : String = Bool.pick(String, U32.is_zero(Run.code(r)), "generator-reject", "raw-reject")
-    interp.fail(cfg, s, kind, ["stage=check", error], Bool.pick(String, U32.is_zero(Run.code(r)), src, prog_text(rawp)), failure_head(error), error, mode)
+    +checks : Bool = U32.is_zero(Wv.v(cli_verdict(r, "check", Cfg.v32(cfg))))
+    +kind : String = Bool.pick(String, checks, "generator-reject", "raw-reject")
+    interp.fail(cfg, s, kind, ["stage=check", error], Bool.pick(String, checks, src, prog_text(rawp)), failure_head(error), error, mode)
 
 # interp.value : the raw and sealed results (a show member's value);
 # failures here are saved by the caller's interp.check
@@ -11092,7 +11125,7 @@ def group_emit?(+cfg: Cfg, +gpu: Chan(Unit), +live: List<&2, MS>, +l: Layout, +p
     +t0 : U32 <-now_ms()
     +r : Run <-bend(cfg, [file, "-o", dir ++ "/" ++ base ++ ".c", "-o", dir ++ "/" ++ base ++ ".js"], WORKER_TIMEOUT())
     +t1 : U32 <-now_ms()
-    +w : Wv = cli_verdict(r, "emit")
+    +w : Wv = cli_verdict(r, "emit", Cfg.v32(cfg))
     +st1 : Stats = st.merge(st, st.phase("emit", (t1 - t0 : U32)))
     +exp : Expect = Bool.pick(Expect, Mb.is_show(m0), Ex{[MS.want(L.nth(MS, MS{MB0(), None{}, None{}}, live, 0))], [], 0}, group_expect(live, Ly.mods(l)))
     If(IO(GCS), U32.is_eq(Wv.v(w), 2), u => IO.pure(GCS, GCS{GC{"", Wv.stage(w), Wv.err(w), src, dir, ""}, st1}),
@@ -11311,7 +11344,7 @@ def clash_test.run?(+cfg: Cfg, +gpu: Chan(Unit), +m: Member, +lanes: Lanes, +mod
         +base : String = "fzc" ++ U32.show(Mb.seed(m))
         +file : String <-prog_dir(cfg, p, dir ++ "/src")
         +rr : Run <-bend(cfg, Bool.pick(List<&2, String>, U32.is_zero(cmode), [file, "--check-only"], [file, "-o", dir ++ "/" ++ base ++ ".c", "-o", dir ++ "/" ++ base ++ ".js"]), WORKER_TIMEOUT())
-        +w : Wv = cli_verdict(rr, Bool.pick(String, U32.is_zero(cmode), "check", "emit"))
+        +w : Wv = cli_verdict(rr, Bool.pick(String, U32.is_zero(cmode), "check", "emit"), Cfg.v32(cfg))
         +v : Maybe<&2, Vd> <-clash.judge(cfg, gpu, m, lanes, mode, kind, cmode, want, w, text, dir, base)
         +x : Run <-run("rm", ["-rf", dir], 60000)
         return VS{v, st.feats(["clash-" ++ kind])}
@@ -11785,7 +11818,9 @@ def main.go?(+as: List<&2, String>) -> IO(Unit):
     +t : Run <-run("mktemp", ["-d", "/tmp/bend-fuzz-XXXXXX"], 10000)
     +tmp : String = String.trim(Run.out(t))
     +now : U32 <-now_ms()
-    +cfg : Cfg = Cfg{root, tmp, findings, U32.min(100, arg_u32(as, "--io-pct", 20)), arg_u32(as, "--threads", 0), arg_u32(as, "--opt", 9), S.in("--metal", as), U32.max(1, arg_u32(as, "--jobs", 8)), b, base_decls(src)}
+    +ok : Bool <-write_file(tmp ++ "/probe.bend", "import Base\n\ndef main() -> U32:\n  0\n")
+    +pr : Run <-run("bun", [root ++ "/bend2/main.ts", tmp ++ "/probe.bend", "--check-only"], 60000)
+    +cfg : Cfg = Cfg{root, tmp, findings, U32.min(100, arg_u32(as, "--io-pct", 20)), arg_u32(as, "--threads", 0), arg_u32(as, "--opt", 9), S.in("--metal", as), U32.max(1, arg_u32(as, "--jobs", 8)), b, base_decls(src), String.contains(Run.out(pr), "PROOFS CHECK")}
     +seed : U32 = Bool.pick(U32, S.in("--chunk", as), arg_u32(as, "--chunk", 0), arg_u32(as, "--seed", mix32(now)))
     If(IO(Unit), S.in("--dump", as), u => IO.print(prog_text(prog_of(b, [Maybe.default(&1, Member, gen_member(b, seed, 0, Cfg.io_pct(cfg)), MB0())], 2, False{}))), u => fuzz(cfg, as, seed, fzsrc))
 

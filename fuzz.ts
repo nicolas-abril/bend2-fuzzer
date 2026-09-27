@@ -878,6 +878,8 @@ type Event is Data:
   Key{U32, Bool}
   Mouse{U32, U32, U32, Bool}
   Move{U32, U32}
+  Look{F32, F32}
+  Scroll{U32, U32, F32, F32}
   Close{}
 type Map<a, -V: Kind(a)> is Kind(a):
   MTip{}

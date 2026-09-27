@@ -126,6 +126,16 @@ since fixed.
 
 `../BUGS.md` lists every bend2-core bug class the fuzzer has found, open
 and fixed, rechecked against bend2-core `af569d48`. The port met these
-open ones: an open Array element type (seed 7141), an alias equal to the
-file's own namespace (seeds 20781 and 20795), and the compiler's stack
-overflow on a large string literal (building its own Base table).
+ones: an open Array element type (seed 7141, #1130), an alias equal to the
+file's own namespace (seeds 20781 and 20795, fixed in 2.0.32), the
+emitters' stack overflow on a large string literal (building its own Base
+table, #1127), and a C fault showing an Array of nested pairs (seed 60052
+on 2.0.32, #1129).
+
+Bend 2.0.32 prints a check's verdict (`ALL PROOFS CHECK`, or `SOME PROOFS
+FAIL` over a refusal), and `--check-only` fails a program that relies on
+unsafe or foreign code as no proof. The harness asks the CLI which it
+speaks once at startup (`Cfg.v32`): under 2.0.32 a refusal is an error
+under `SOME PROOFS FAIL`, a check failing only for unsafe code passes, and
+any other error is a crash; before, a refusal is an error with no check
+report before it.
