@@ -121,6 +121,34 @@ constructors, fields and binders draw from one identifier distribution
 mixing random shapes with words and fragments collected from the whole Bend
 implementation and the JS host; binders sometimes shadow a live name.
 
+## The Bend port
+
+`bend/fuzz.bend` is the same fuzzer written in Bend: the generator and the
+harness, ported from `fuzz.ts` at the tag `bend2-ts`. It draws the same
+kinds of programs from the same Base table and runs the same legs, as
+processes: the `bend` CLI interprets a pure `main` listing every member's
+raw and sealed results and emits C and JS with `-o`; clang, the compiled
+binary and bun run the rest. It does not import bend (so the template
+table's invariants, which need the checked book, are not checked). Pure
+work runs on one thread per Bend process, so a run is several copies of
+the fuzzer, each testing chunks of seeds, merged by the first.
+
+```sh
+sh ../bend2-fuzzer/bend/fuzz.sh [count | duration] [--seed N] [options]
+```
+
+`fuzz.sh` builds `bend/.build/fuzz` with `bend -o` (95 s) when
+`fuzz.bend` is newer than it, then runs it from the bend2-core checkout
+(`FZ_ROOT`, by default a sibling of this repo). Options as above, less
+`--cuda`, plus `--procs N` (fuzzer processes, default seven tenths of the
+runtime's threads) and `--jobs N` (groups in flight per process, default
+3). Seeds are 32-bit and a group's seeds are consecutive. Findings land in
+`findings-bend/` unless `FZ_FINDINGS` says otherwise. `bend/PORT.md` lists
+the limitations of Bend the port met and the known bugs of bend2-core;
+`bend/tools/` holds the scripts that generate its records (`st.py`,
+`regen.py`), copy the Base table (`table.py`) and mark reusable binders
+(`plus.py`).
+
 ## Output
 
 Findings land in `findings/` (git-ignored) as standalone `.bend` files with
