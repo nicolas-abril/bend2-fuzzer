@@ -8,8 +8,10 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["fuzz.ts", "keys.ts", "campaign.ts"]
+  "include": ["fuzz.ts"]
 }
