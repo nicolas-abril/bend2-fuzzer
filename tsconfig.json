@@ -1,8 +1,6 @@
 {
   "compilerOptions": {
-    "lib": [
-      "ESNext"
-    ],
+    "lib": ["ESNext"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleResolution": "bundler",
@@ -10,12 +8,10 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
-    "types": [
-      "bun"
-    ]
+    "types": ["bun"]
   },
-  "include": [
-    "fuzz.ts"
-  ]
+  "include": ["fuzz.ts"]
 }

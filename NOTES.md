@@ -258,6 +258,108 @@ into the general execution.
   template arguments take no rewrite wrapper (`c.s.tmpl`); an array literal
   needs a Data element.
 
+Read, not mirrored, 2026-09-26: the generator's model of the language comes
+from bend2-core itself, and the remaining kits and whitelists went.
+
+- **Types from the Base book** (`base_load`): every datatype of Base is an
+  `Adt` (quantity, type and index parameters, kind, constructors and field
+  types converted from the lowered telescopes), so Bool, Cmp, Char, String,
+  Nat, Unit, List, Maybe, Either, Result, Map, Image, Event, IO.OP and App
+  are one kind of type the generator draws, builds, matches and reads; the
+  special type kinds (`bool`, `cmp`, `char`, `str`, `unit`, `set`, `map`,
+  `arr`, `io`, `tup`) and the hand-written List/Maybe/Either/Result shapes
+  are gone. A type whose fields have no spelling (U32 and F32 hold a
+  `Word(32n)`) is opaque; Array too, since a hand-built `ALeaf`/`ANode`
+  tree fail-stops every runtime. Type-level defs unfold when their body has
+  a spelling (`Set()` is `Map<&2, Unit>`, `Pair`, `Or`, `Exists`); the rest
+  (`IO(A)`, `Chan(A)`, handles) are opaque types applied with parens.
+  Tuples and dependent pairs are one `sig` kind (Base's Sigma).
+- **One registry for all of Base's interface**: every `Family.fn` def whose
+  signature converts, the numeric families included (the `num_gen_*`
+  rosters, `helper_bool/cmp/chr/strlen`, `hof_call`, `generic_mint`, the
+  builders and the transforms are gone). Flags come from the body:
+  `stuck` reaches a native claim (a bodiless def of a value: F32's ops,
+  the effects) or a Nat literal of 2^16 or more (`Nat.read`'s overflow
+  guard), and stays off the pure side; `effect` reaches an IO claim or a
+  constructor of `IO.OP` (`IO.die`, `IO.pass`, `IO.try` halt) and is never
+  drawn. A Nat argument is a small word converted (`% 6`), and a word
+  becoming a Nat is small (`% 64`): the interpreter's Nat is unary. Deeper
+  names (`.go`, `.if`, `.fin`, `.at`) are helpers: calling them directly
+  broke their preconditions (a 4-billion-step unary loop the emitter tried
+  to fold) and reached Array helpers the backends never emit ("an open
+  Array element type: T^0", 14 in 1,000 seeds before the rule).
+- **Operators from the parser's table** (`OPS`, read from `INFIX` in
+  bend.ts): a two-argument call of a method the table names is spelled
+  `(a op b : F)`, an operand of the same frame inheriting it; fixed names
+  bare (`||`, `&&`, `++`, `<>` for Con in terms and patterns);
+  `Array.get`/`set` at U32 as `a[i]` / `(a[i] <- v)` on any array term.
+- **Literals per type** (`LITS`): U32, F32, Nat, Char, String, List (a
+  cons chain in parens), Array (Data elements only).
+- **`def_new` covers generics and templates**: the goal generalized over a
+  type variable (and the quantities governing it, `A: Kind(a)`, checked
+  by `ty_wf`), a leading function parameter a template (every hdr
+  parameter then a template too, passed through on self-calls), leaves
+  opening with lets of any type, do-blocks for any Base family with
+  `.bind` and `.pure`.
+- **Readers are structural for every transparent type** (`rd_def`);
+  an opaque one is observed through a registry call that takes it and
+  answers another closed type (`observe`: `F32.to_u32`, `Array.size`,
+  ..), else dropped.
+- **One size distribution** (`Gen.size`, a Pareto draw with `TAIL`) for
+  every count; expression fuel is a budget split among parts (`split`).
+  **`ty_cost`** (the fewest steps to a value of a type once the budget is
+  spent) replaced the inhabitation predicate, which took every cycle as
+  inhabited; below `FLOOR` a goal takes a leaf form or its cheapest
+  completion, so every term ends, and when all productions at a goal fail
+  it completes there. A per-member step budget (`STEPS`) is the backstop.
+- **A dying member closes its group**: `die` is part of the profile, the
+  seed ends its group and runs last, so main is one block and one run
+  checks it (the `FZ_MEMBER` dispatch, the selector chain and the per-run
+  environment went). The feature list is read off the source's `feat(..)`
+  calls. `FIELD_MASKS` keeps a `Chr{..}` code below the surrogates (the
+  JS limit had skipped 10% of seeds once Char became a plain datatype).
+- Probed while rewriting: `a[i]` and `a[i] <- v` take any array term but
+  only a U32 element; a do-bind's type annotation parenthesizes an arrow;
+  a template's argument may not call a template (its instances do not stop
+  growing); a tuple needs Base (Sigma is Base's); a `+`-domain arrow needs
+  a Data domain; an indexed datatype takes no type parameter.
+- The 1,000-seed validation (`--seed 1`): 998 ok, 0 skips, 2 findings,
+  both open bend2-core classes (F4 and K2), 9.9 seeds/s.
+
+The generator stops importing bend, 2026-09-27: Base is the fuzzer's own
+redefinition, `BASE_TABLE` — Base's datatypes (with constructors, or
+`opaque`) and 223 explicitly picked defs, in Base's declaration syntax,
+read by a small type parser (`ty_parse`, `base_load`). A def is marked
+`# stuck` by hand where it reaches a native claim; the effects are left out
+of the table instead of flagged; Base's internal plumbing (`Map.bit`,
+`Map.lo`/`hi`, `Map.seek`/`ins`/`put`, `Image.*`, `App.*`) is not picked.
+The operator table (`OPS`) is explicit, and the identifier vocabulary comes
+from base.bend's text and the JS host's names. The worker, the harness of
+the toolchain under test, still imports bend.ts and comp.ts. The table is
+also the port's: the Bend version of the fuzzer carries the same text. A
+signature change in Base now shows up as `raw-reject` until the table is
+updated. Validation: 999 of 1,000 (`--seed 1`), the one finding F4.
+
+The fuzzer in Bend, 2026-09-27: `bend/fuzz.bend` ports `fuzz.ts` (tag
+`bend2-ts`), generator and harness, 12k lines; `bend/PORT.md` lists the
+limitations of Bend it met, `BUGS.md` every bend2-core bug class the
+fuzzer has found. The generator
+is a state monad over one record (`G(A) = St -> St & Maybe<A>`, failure as
+None, the accessors generated by `bend/tools/st.py`); its productions are
+`fuzz.ts`'s, one def per branch, with term budgets shifted by 3 (Bend's
+words are unsigned) and the cost memo keyed by a structural hash of the
+type. The harness does not import bend: the interpreter leg is the CLI on a
+program whose pure `main` lists every member's raw and sealed results (one
+run per group, each member alone when it fails), the emit leg `bend -o`;
+the template-table check went with the in-process worker. Pure work runs
+on one thread per Bend process, so a run is several copies of the fuzzer
+(`--procs`, default 7 on 10 threads) testing 12-seed chunks with 3 fibers
+each, the first one merging their tallies. `trans` is gone: nothing set it.
+An indexed datatype whose constructors are all nullary is no index type
+(`fuzz.ts` would draw it as one; the port's first 3,000 seeds did, seed
+21514). 1,000 seeds from `--seed 7000`: 9.3 seeds/s against `fuzz.ts`'s
+9.2 on the same bend2-core commit.
+
 Restructured on 2026-09-02:
 
 - **Ctx**: the generator's state is one `State` (entries, adts, registry,
@@ -408,8 +510,9 @@ drowns real signal. Delta-reduced repros for all of these sit in
   chain as its body; a nested match on a `+`-marked field binder), both
   fixed in the generator the same day. 227 skips, 204 of them programs
   that call `Nat.read` (below).
-- **`Nat.read` is not generated** since 2026-09-15 (it was the
-  `nat-showread` entry of `num_gen_nat`'s roster; `U32.read` stays).
+- **`Nat.read` stays off the interpreter-visible side** (since 2026-09-26
+  by the registry's `stuck` rule: its body holds a Nat literal past 2^16;
+  before, it was dropped from `num_gen_nat`'s roster).
   Since bend2-core `77eff95` (2026-09-08) its overflow guard computes
   `Nat.divmod(2^48-1 - d, 10)` per digit, and base's divmod is an
   accumulator loop that counts the dividend down one cell at a time, so
@@ -468,8 +571,9 @@ drowns real signal. Delta-reduced repros for all of these sit in
   as `raw-reject`: `Array.clone` gained `-T: Data` (`592b0df`) and
   `Result.fail` was removed (spell the `Fail{..}` ctor). Since 2026-09-24
   Base's own signatures feed the registry, so a signature change moves the
-  generator with it; hand-spelled Base calls (rosters, readers, the IO
-  tail) can still drift. Run a thousand seeds after any base change before
+  generator with it, and since 2026-09-26 its types and operators too; the
+  hand-spelled Base calls left (the IO tail, the seal, the proofs) can
+  still drift. Run a thousand seeds after any base change before
   trusting a long run.
 - `trans-ulp` skips: float transcendentals are each backend's libm-family
   routines; a `trans`-flagged member keeps every leg except the JS-vs-C
