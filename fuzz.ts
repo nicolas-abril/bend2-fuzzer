@@ -1112,12 +1112,6 @@ def Set.del(x0: Map<&2, Unit>, x1: String) -> Map<&2, Unit>
 def Set.size(x0: Map<&2, Unit>) -> Nat
 def Set.to_list(x0: Map<&2, Unit>) -> List<&2, String>
 def Set.from_list(x0: List<&2, String>) -> Map<&2, Unit>
-def Image.sink(x0: Image) -> Unit
-def Image.free(+x0: Nat, x1: Image) -> Unit
-def Image.drop(x0: Image) -> Unit
-def App.more(-S: Kind(&1), x0: S -> IO(Maybe<S>), x1: Maybe<S>) -> IO(Maybe<S>)
-def App.fold(-S: Kind(&1), x0: App<S>, x1: List<Event>, x2: S, x3: S -> IO(Maybe<S>)) -> IO(Maybe<S>)
-def App.play(~S: Kind(&1), ~x0: App<S>, x1: List<List<Event>>, x2: S) -> IO(Maybe<S>)
 `;
 
 const BASE_ADTS = new Map<string, Adt>();

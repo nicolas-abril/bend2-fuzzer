@@ -328,7 +328,7 @@ from bend2-core itself, and the remaining kits and whitelists went.
 
 The generator stops importing bend, 2026-09-27: Base is the fuzzer's own
 redefinition, `BASE_TABLE` — Base's datatypes (with constructors, or
-`opaque`) and 229 explicitly picked defs, in Base's declaration syntax,
+`opaque`) and 223 explicitly picked defs, in Base's declaration syntax,
 read by a small type parser (`ty_parse`, `base_load`). A def is marked
 `# stuck` by hand where it reaches a native claim; the effects are left out
 of the table instead of flagged; Base's internal plumbing (`Map.bit`,
