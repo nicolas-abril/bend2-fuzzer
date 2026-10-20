@@ -4537,7 +4537,7 @@ type WorkerRes = {
 };
 
 // tmps_check : the template table's invariants (see above), or null
-function tmps_check(book: { tlds: Record<string, unknown>; tmps: Record<string, Record<string, string>> }): string | null {
+function tmps_check(book: { tlds: Record<string, unknown>; tmps: Record<string, Record<string, string> | Map<string, string>> }): string | null {
   const owner = new Map<string, string>();
   const lossy = (x: unknown): boolean => {
     if (Array.isArray(x)) {
@@ -4553,7 +4553,7 @@ function tmps_check(book: { tlds: Record<string, unknown>; tmps: Record<string, 
     return Object.values(o).some(lossy);
   };
   for (const [t, is] of Object.entries(book.tmps)) {
-    for (const [k, inst] of Object.entries(is)) {
+    for (const [k, inst] of is instanceof Map ? is : Object.entries(is)) {
       const prev = owner.get(inst);
       if (prev !== undefined) {
         return "instance " + inst + " named by two keys: " + prev.slice(0, 200) + " and " + (t + " " + k).slice(0, 200);
@@ -4655,11 +4655,11 @@ async function worker_main(): Promise<void> {
           book.tlds[k] = { ...(base.tlds[k] as Record<string, unknown>) };
         }
         Object.assign(book.ctrs, base.ctrs);
-        // The parser reads a ~ argument from the callee's template
-        // descriptor, so every request needs fresh instance tables.
+        // every request gets its own copy of Base's instance tables (a Map
+        // since bendlang/bend#1275, a plain object before)
         for (const k of Object.keys(base.tmps)) {
-          const tm = base.tmps[k] as { p: Record<string, unknown>; is: Record<string, string> };
-          book.tmps[k] = { ...tm, p: { ...tm.p, book }, is: { ...tm.is } };
+          const is = base.tmps[k] as Record<string, string> | Map<string, string>;
+          book.tmps[k] = is instanceof Map ? new Map(is) : { ...is };
         }
         book.order.push(...base.order);
         baseCount = base.order.length;
