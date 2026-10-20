@@ -11,9 +11,9 @@
 //     structural code (Word adder chains), so this leg is also a bit-level
 //     spec differential against the native ops the backends substitute.
 //   - C (compile_book): one standalone .c, built with clang at the group's
-//     drawn -O level and run sequentially (--threads 1 --gpu off), then in
+//     drawn -O level and run sequentially (+RTS --threads 1 --gpu off), then in
 //     parallel at the group's drawn thread count; with --metal / --cuda the
-//     same .c is rebuilt for the device and run --gpu on.
+//     same .c is rebuilt for the device and run +RTS --gpu on.
 //   - JS (js_book): the emitted .js run under bun.
 //
 // Every checked book also meets the template table's invariants (distinct
@@ -171,9 +171,9 @@ function print_help(): void {
     "                 (files, env, stderr, exit codes, fibers, channels,",
     "                 timers; default 20)",
     "  --metal        ALSO build each program with -DBEND_METAL and run",
-    "                 --gpu on (macOS; GPU runs are serialized)",
+    "                 +RTS --gpu on (macOS; GPU runs are serialized)",
     "  --cuda         ALSO build each program with -DBEND_CUDA and run",
-    "                 --gpu on (Linux + NVIDIA)",
+    "                 +RTS --gpu on (Linux + NVIDIA)",
     "  --dump         print the program of --seed (both spellings) and exit",
     "  -h, --help     show this help and exit",
     "",
@@ -5095,7 +5095,7 @@ async function compiled(w: WorkerRes, want: Want, trans: number[], lanes: Lanes,
     return out(cc.skip === true ? { skip: cc.why } : { fail: cc.why ?? "cc failed" });
   }
   fs.writeFileSync(jsf, w.jssrc ?? "");
-  const seq = await phase("run:seq", () => leg_run(cpu, ["--threads", "1", "--gpu", "off"], dir, cap));
+  const seq = await phase("run:seq", () => leg_run(cpu, ["+RTS", "--threads", "1", "--gpu", "off"], dir, cap));
   if (seq.why !== undefined) {
     return out({ fail: "C-SEQ " + seq.why });
   }
@@ -5138,11 +5138,11 @@ async function compiled(w: WorkerRes, want: Want, trans: number[], lanes: Lanes,
     return out({ fail: js });
   }
   const par = check("C-PAR(" + String(lanes.threads) + ")", false,
-    await phase("run:par", () => leg_run(cpu, ["--threads", String(lanes.threads), "--gpu", "off"], dir, cap * 2)));
+    await phase("run:par", () => leg_run(cpu, ["+RTS", "--threads", String(lanes.threads), "--gpu", "off"], dir, cap * 2)));
   if (par !== null) {
     return out({ fail: par });
   }
-  // GPU lanes: the same .c rebuilt with the platform flags, run --gpu on,
+  // GPU lanes: the same .c rebuilt with the platform flags, run +RTS --gpu on,
   // strictly one program at a time
   const gpus: Array<[boolean, string, string[]]> = [
     [WITH_METAL, "METAL", ["-DBEND_METAL=1", "-x", "objective-c", "-fobjc-arc", "-framework", "Metal", "-framework", "Foundation"]],
@@ -5161,7 +5161,7 @@ async function compiled(w: WorkerRes, want: Want, trans: number[], lanes: Lanes,
       }
       // the device program is built once beside the binary, as `bend -o`
       // does; a launch without it compiles and says so on stderr
-      const gb = await phase("gpu-build", () => leg_exec(path.join(dir, bin), ["--gpu-build"], dir, GPU_CC_TIMEOUT));
+      const gb = await phase("gpu-build", () => leg_exec(path.join(dir, bin), ["+RTS", "--gpu-build"], dir, GPU_CC_TIMEOUT));
       if (gb.timeout) {
         return { skip: lname + "-build-timeout" };
       }
@@ -5169,7 +5169,7 @@ async function compiled(w: WorkerRes, want: Want, trans: number[], lanes: Lanes,
         // a refusal may come at the device build, before any run
         return "refuse" in want && want.refuse.test(gb.err + gb.out) ? {} : { fail: label + " GPU BUILD FAILURE:\n" + (gb.err + gb.out).slice(0, 2000) };
       }
-      const f = check(label, true, await phase("run:" + lname, () => leg_run(path.join(dir, bin), ["--gpu", "on"], dir, GPU_RUN_TIMEOUT * Math.max(1, members))));
+      const f = check(label, true, await phase("run:" + lname, () => leg_run(path.join(dir, bin), ["+RTS", "--gpu", "on"], dir, GPU_RUN_TIMEOUT * Math.max(1, members))));
       return f !== null ? { fail: f } : {};
     });
     if (got.skip !== undefined || got.fail !== undefined) {

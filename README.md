@@ -11,10 +11,10 @@ spellings (raw and identity-sealed) and cross-checks every leg:
   also a bit-level spec differential against the native ops the backends
   substitute. A book without Base has this leg only.
 - **C** (`compile_book`): one standalone `.c` built with clang at the
-  group's drawn `-O` level, run sequentially (`--threads 1 --gpu off`) and
+  group's drawn `-O` level, run sequentially (`+RTS --threads 1 --gpu off`) and
   in parallel at the group's drawn thread count; with `--metal` (macOS) or
   `--cuda` (Linux + NVIDIA) the same `.c` is rebuilt for the device and run
-  `--gpu on`.
+  `+RTS --gpu on`.
 - **JS** (`js_book`): the emitted `.js` run under bun.
 
 Every checked book also meets the template table's invariants: distinct `~`
@@ -71,8 +71,8 @@ bun ../bend2-fuzzer/fuzz.ts [count | duration] [--seed N] [options]
 | `--seed N` | base seed (reproducible; findings print their exact repro line) |
 | `--jobs N` | groups in flight (default: min(8, cpus−2)) |
 | `--io-pct N` | percent of seeds carrying an IO tail (default 20) |
-| `--metal` | also build with `-DBEND_METAL` and run `--gpu on` (macOS; GPU-serialized) |
-| `--cuda` | also build with `-DBEND_CUDA` and run `--gpu on` (Linux + NVIDIA) |
+| `--metal` | also build with `-DBEND_METAL` and run `+RTS --gpu on` (macOS; GPU-serialized) |
+| `--cuda` | also build with `-DBEND_CUDA` and run `+RTS --gpu on` (Linux + NVIDIA) |
 | `--dump` | print the program of `--seed` (both spellings) and exit |
 | `--threads N` / `--opt N` | override the drawn C-PAR thread count / clang `-O` level (repro lines use them) |
 

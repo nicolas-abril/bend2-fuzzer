@@ -10806,7 +10806,7 @@ def compiled?(+cfg: Cfg, +gpu: Chan(Unit), +dir: String, +base: String, +w: Want
 def compiled.seq?(+cfg: Cfg, +gpu: Chan(Unit), +dir: String, +base: String, +w: Want, +lanes: Lanes, +cap: U32, +mode: Mode, +st: Stats) -> IO(CS):
   do IO<CS>:
     +t0 : U32 <-now_ms()
-    +seq : Run <- leg(dir, "./" ++ base ++ "_cpu --threads 1 --gpu off", cap)
+    +seq : Run <- leg(dir, "./" ++ base ++ "_cpu +RTS --threads 1 --gpu off", cap)
     +t1 : U32 <-now_ms()
     +st1 : Stats = st.merge(st, st.phase("run:seq", (t1 - t0 : U32)))
     +d : String = cmp_expect(w, seq)
@@ -10827,7 +10827,7 @@ def compiled.rest?(+cfg: Cfg, +gpu: Chan(Unit), +dir: String, +base: String, +w:
     +t1 : U32 <-now_ms()
     +fj : String = lane_check("JS", w, seq, js)
     +kj : String = known_limit("JS", fj)
-    +par : Run <-If(IO(Run), (String.is_empty(fj) || Bool.not(String.is_empty(kj))), u => leg(dir, "./" ++ base ++ "_cpu --threads " ++ U32.show(Lanes.threads(lanes)) ++ " --gpu off", (cap * 2 : U32)), u => IO.pure(Run, Run{0, "", "", 0}))
+    +par : Run <-If(IO(Run), (String.is_empty(fj) || Bool.not(String.is_empty(kj))), u => leg(dir, "./" ++ base ++ "_cpu +RTS --threads " ++ U32.show(Lanes.threads(lanes)) ++ " --gpu off", (cap * 2 : U32)), u => IO.pure(Run, Run{0, "", "", 0}))
     +t2 : U32 <-now_ms()
     +label : String = "C-PAR(" ++ U32.show(Lanes.threads(lanes)) ++ ")"
     +fp : String = Bool.pick(String, (String.is_empty(fj) || Bool.not(String.is_empty(kj))), lane_check(label, w, seq, par), "")
@@ -10837,7 +10837,7 @@ def compiled.rest?(+cfg: Cfg, +gpu: Chan(Unit), +dir: String, +base: String, +w:
         v => If(IO(CS), (Cfg.metal(cfg) && Mode.gpu(mode)), x => compiled.metal(gpu, dir, base, w, lanes, cap, st1, seq, kj), x => IO.pure(CS, CS{Lv{"", "", kj}, st1}))))
 
 # compiled.metal : the same .c rebuilt for Metal, built on the device and
-# run --gpu on, strictly one GPU program at a time
+# run +RTS --gpu on, strictly one GPU program at a time
 def compiled.metal?(+gpu: Chan(Unit), +dir: String, +base: String, +w: Want, +lanes: Lanes, +cap: U32, +st: Stats, +seq: Run, +known: String) -> IO(CS):
   do IO<CS>:
     +tok : Maybe<&1, Unit> <-Chan.recv(Unit, gpu)
@@ -10849,14 +10849,14 @@ def compiled.metal?(+gpu: Chan(Unit), +dir: String, +base: String, +w: Want, +la
 
 def compiled.metal.run?(+dir: String, +base: String, +w: Want, +cap: U32, +seq: Run, +known: String) -> IO(Lv):
   do IO<Lv>:
-    +gb : Run <-leg(dir, "./" ++ base ++ "_metal --gpu-build", 300000)
+    +gb : Run <-leg(dir, "./" ++ base ++ "_metal +RTS --gpu-build", 300000)
     If(IO(Lv), Run.timeout(gb), u => IO.pure(Lv, Lv{"", "metal-build-timeout", known}),
       u => If(IO(Lv), Bool.not(U32.is_zero(Run.code(gb))), v => IO.pure(Lv, Bool.pick(Lv, want_refused(w, Run.err(gb) ++ Run.out(gb)), Lv{"", "", known}, Lv{"METAL GPU BUILD FAILURE:\n" ++ String.take(Run.err(gb) ++ Run.out(gb), 2000n), "", known})),
         v => compiled.metal.go(dir, base, w, cap, seq, known)))
 
 def compiled.metal.go?(+dir: String, +base: String, +w: Want, +cap: U32, +seq: Run, +known: String) -> IO(Lv):
   do IO<Lv>:
-    +r : Run <-leg(dir, "./" ++ base ++ "_metal --gpu on", (cap * 3 : U32))
+    +r : Run <-leg(dir, "./" ++ base ++ "_metal +RTS --gpu on", (cap * 3 : U32))
     +f : String = lane_check("METAL", w, seq, r)
     +k : String = known_limit("METAL", f)
     return Bool.pick(Lv, (String.is_empty(f) || Bool.not(String.is_empty(k))), Lv{"", "", Bool.pick(String, String.is_empty(known), k, known)}, Lv{f, "", known})
@@ -11772,7 +11772,7 @@ def HELP?() -> String:
     "  --jobs N       parallel groups in flight per process (default 3, or 8",
     "                 with one process)",
     "  --io-pct N     percent of seeds with a deterministic IO tail (default 20)",
-    "  --metal        ALSO build each program for Metal and run --gpu on",
+    "  --metal        ALSO build each program for Metal and run +RTS --gpu on",
     "  --threads N    the C-PAR thread count (default: drawn per group)",
     "  --opt N        the clang -O level (default: drawn per group)",
     "  --dump         print the program of --seed (both spellings) and exit",
